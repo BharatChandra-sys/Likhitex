@@ -1,0 +1,66 @@
+name: Daily Backup
+
+on:
+  schedule:
+    # Run at 3 AM UTC every day
+    - cron: '0 3 * * *'
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  backup:
+    name: Backup Database and Storage
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      
+      - name: Install age for encryption
+        run: |
+          wget https://github.com/FiloSottile/age/releases/download/v1.1.1/age-v1.1.1-linux-amd64.tar.gz
+          tar xf age-v1.1.1-linux-amd64.tar.gz
+          sudo mv age/age /usr/local/bin/
+          sudo mv age/age-keygen /usr/local/bin/
+      
+      - name: Backup database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AGE_PUBLIC_KEY: ${{ secrets.AGE_PUBLIC_KEY }}
+        run: |
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="backup_${TIMESTAMP}.sql"
+          
+          # Create backup
+          pg_dump "${DATABASE_URL}" > "${BACKUP_FILE}"
+          
+          # Encrypt backup
+          age -r "${AGE_PUBLIC_KEY}" -o "${BACKUP_FILE}.age" "${BACKUP_FILE}"
+          rm "${BACKUP_FILE}"
+          
+          # Upload to GitHub (or S3/R2)
+          echo "Backup created: ${BACKUP_FILE}.age"
+      
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup
+          path: backup_*.age
+          retention-days: 30
+      
+      # TODO: Add R2 bucket backup sync
+      # - name: Sync R2 bucket
+      #   env:
+      #     R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      #     R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      #   run: |
+      #     # Use rclone or aws cli to sync bucket
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Backup failed! Check logs immediately."
+          # TODO: Add Slack/Discord/email notification

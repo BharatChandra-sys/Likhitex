@@ -1,0 +1,5 @@
+README.md
+test_*.json
+*.pdf
+.git
+.gitignore

@@ -1,0 +1,61 @@
+version: '3.9'
+
+# Local development environment
+# Runs: Postgres + Mailpit + (optionally) Redis
+# API and frontend run natively for faster hot-reload
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    container_name: likhitex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-likhitex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-likhitex}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-likhitex}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Mailpit (SMTP testing, local only)
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: likhitex-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+  # Redis (optional for local dev, use Upstash in prod)
+  # Uncomment if you want to test Redis locally
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: likhitex-redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   command: redis-server --appendonly yes
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+  # redis_data:
+  #   driver: local

@@ -1,0 +1,105 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Project notes (not for repo)
+claudechat.md
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.kiro/
+# Next.js
+apps/web/.next/
+apps/web/out/
+apps/web/.turbo/
+
+# Python
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker
+docker-compose.override.yml
+
+# Backups
+backups/
+*.backup
+*.dump
+
+# Temp files
+tmp/
+temp/
+*.tmp
+
+# Secrets (double-check these never get committed)
+*.key
+*.pem
+*.cer
+*.crt
+id_rsa
+id_rsa.pub
+secrets.yaml
+credentials.json
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.bbl
+*.blg
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Render build cache
+.render/
+
+# Internal documentation (not for public repo)
+claudechat.md
+docs/
+CONTRIBUTING.md
+DISASTER_RECOVERY.md

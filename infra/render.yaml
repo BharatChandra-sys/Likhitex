@@ -1,0 +1,74 @@
+# Render Blueprint
+# Deploys the FastAPI backend to Render
+# Use this file to create the service: render.com > New > Blueprint
+
+services:
+  # FastAPI + Hocuspocus (WebSocket collab)
+  - type: web
+    name: likhitex-api
+    env: docker
+    region: oregon  # Choose closest to your users
+    plan: free  # Upgrade to 'starter' ($7) or 'standard' ($25) for better performance
+    
+    # Build
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: ./apps/api
+    
+    # Auto-deploy
+    branch: main
+    autoDeploy: true
+    
+    # Health check
+    healthCheckPath: /health
+    
+    # Environment variables (set these in Render dashboard)
+    envVars:
+      - key: APP_ENV
+        value: production
+      
+      - key: DEBUG
+        value: false
+      
+      - key: LOG_LEVEL
+        value: INFO
+      
+      - key: DATABASE_URL
+        sync: false  # Set manually in dashboard
+      
+      - key: REDIS_URL
+        sync: false  # Set manually in dashboard
+      
+      - key: CLERK_SECRET_KEY
+        sync: false  # Set manually in dashboard
+      
+      - key: R2_ACCOUNT_ID
+        sync: false
+      
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      
+      - key: R2_BUCKET_NAME
+        value: likhitex-files
+      
+      - key: CORS_ORIGINS
+        sync: false  # Set to your Vercel URL
+      
+      - key: SECRET_KEY
+        generateValue: true  # Auto-generate
+      
+      - key: COMPILE_TIMEOUT_SECONDS
+        value: 60
+      
+      - key: COMPILE_BACKEND
+        value: local
+      
+      - key: MAIL_BACKEND
+        value: console  # Change to 'http' when ready
+      
+      - key: RATE_LIMIT_ENABLED
+        value: true
+
+# Docs: https://render.com/docs/blueprint-spec
