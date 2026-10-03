@@ -3,14 +3,11 @@
 ![Likhitex Logo](frontend/public/logo.png)
 
 A private, invite-only collaborative LaTeX editor for trusted research groups and academic teams.
+
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
-
-[Features](#features) • [Architecture](#architecture) • [Quick Start](#quick-start) • [Documentation](#documentation) • [Contributing](#contributing)
-
-</div>
-
----
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-Required-blue.svg)](https://www.docker.com/)
 
 ## Overview
 
