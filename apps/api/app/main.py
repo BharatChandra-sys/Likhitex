@@ -112,14 +112,21 @@ async def global_exception_handler(request, exc: Exception):
 
 # Import routers
 from app.compile.routes import router as compile_router
+from app.projects.routes import router as projects_router
+from app.files.routes import router as files_router
+from app.users.routes import router as users_router
 
 # Register routers
 app.include_router(compile_router, prefix="/api/compile", tags=["compile"])
+app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
+app.include_router(
+    files_router,
+    prefix="/api/projects/{project_id}/files",
+    tags=["files"]
+)
+app.include_router(users_router, prefix="/api/users", tags=["users"])
 
-# TODO Phase 2: Add auth routes
-# TODO Phase 2: Add project routes
-# TODO Phase 2: Add file routes
-# TODO Phase 3: Add WebSocket routes
+# TODO Phase 3: Add WebSocket routes for collaboration
 
 
 if __name__ == "__main__":

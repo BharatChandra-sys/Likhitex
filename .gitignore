@@ -104,3 +104,9 @@ claudechat.md
 docs/
 CONTRIBUTING.md
 DISASTER_RECOVERY.md
+
+# Stitch design files (local only)
+stitch_likhitex/
+*.png
+!apps/web/public/*.png
+STATUS.md
