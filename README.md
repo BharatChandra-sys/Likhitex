@@ -1,7 +1,5 @@
 <div align="center">
 
-# Likhitex
-
 ![Likhitex Logo](frontend/public/logo.png)
 
 A private, invite-only collaborative LaTeX editor for trusted research groups and academic teams.
