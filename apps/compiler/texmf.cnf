@@ -1,73 +1,65 @@
 % Hardened texmf.cnf for Likhitex
-% Security-focused LaTeX configuration
-% Blocks shell-escape and restricts file access
+%
+% Security-focused kpathsea configuration for untrusted LaTeX input.
+%
+% NOTE ON PRECEDENCE: kpathsea resolves variables in the order
+%   command line > environment > texmf.cnf > compiled-in defaults.
+% runner.py sets TEXMFOUTPUT/TEXMFINPUT (plus HOME/TEXMFVAR/TEXMFCONFIG/TEXMFHOME)
+% to the per-job scratch directory, which overrides the paths below. That is
+% what actually confines a job: `openin_any = p` restricts reads to
+% TEXMFINPUT and `openout_any = p` restricts writes to TEXMFOUTPUT, so if the
+% environment is ever lost the job degrades to "cannot read/write anywhere"
+% rather than falling open to the whole filesystem.
 
-% CRITICAL SECURITY SETTINGS
+% --- Execution -----------------------------------------------------------
 
-% Disable shell escape (prevents code execution)
+% No shell escape. This is the primary defence against \write18, minted,
+% pythontex and friends. The runner also passes -no-shell-escape and rejects
+% those constructs statically, so a mistake in any one of the three layers
+% still leaves two.
 shell_escape = f
 shell_escape_commands =
 
-% Paranoid file access restrictions
-% 'p' = paranoid (only reads from allowed paths)
-openin_any = p
-openout_any = p
-
-% Allowed read paths (colon-separated)
-% Only allow reading from compile directory and TeX distribution
-TEXMFOUTPUT = /compile
-openin_any_path = /compile:/usr/share/texlive:/usr/share/texmf
-
-% Block writing outside compile directory
-openout_any_path = /compile
-
-% RESOURCE LIMITS
-
-% Max memory allocation (bytes)
-main_memory = 12000000
-extra_mem_bot = 10000000
-font_mem_size = 8000000
-pool_size = 6250000
-buf_size = 200000
-nest_size = 500
-max_strings = 500000
-param_size = 60000
-save_size = 100000
-stack_size = 5000
-
-% ADDITIONAL SECURITY
-
-% Disable mktex scripts (prevent dynamic package installation)
+% TeX's dynamic package/mktex machinery can download and run code.
 MKTEXTEX = 0
 MKTEXPK = 0
 MKTEXMF = 0
 MKTEXTFM = 0
 MKTEXFMT = 0
-
-% Disable network access
-TEXMFNET =
-
-% Disable external program execution
 TEXMFSCRIPTS =
 
-% PATHS (standard TeX Live locations)
+% No network lookups of any kind.
+TEXMFNET =
 
-TEXMFCONFIG = ~/.texlive2023/texmf-config
-TEXMFVAR = ~/.texlive2023/texmf-var
-TEXMFHOME = ~/texmf
+% --- File access ---------------------------------------------------------
+
+% p = paranoid: only paths in TEXMFINPUT / TEXMFOUTPUT are reachable.
+% This is what blocks \input{/etc/passwd} and \openin|/etc/hostname.
+openin_any = p
+openout_any = p
+
+% Fallbacks used only when the runner's environment is absent.
+TEXMFOUTPUT = .
+TEXMFINPUT = .:/usr/share/texlive/texmf-dist:/usr/share/texmf:/etc/texmf
+
+% --- Output --------------------------------------------------------------
+
+synctex = 1
+interaction = nonstopmode
+
+% Keep TeX's stdout small: the API parses it as JSON, and an unbounded log is
+% a memory-exhaustion vector.
+max_print_line = 1000
+error_line = 254
+half_error_line = 238
+
+% --- Paths ---------------------------------------------------------------
+
+TEXMFCONFIG = /tmp/texmf-config
+TEXMFVAR = /tmp/texmf-var
+TEXMFHOME = /tmp/texmf-home
 TEXMFLOCAL = /usr/local/share/texmf
 TEXMFSYSCONFIG = /etc/texmf
 TEXMFSYSVAR = /var/lib/texmf
 TEXMFMAIN = /usr/share/texlive/texmf-dist
 TEXMFDIST = /usr/share/texlive/texmf-dist
-
-% Search path
-TEXMF = {$TEXMFCONFIG,$TEXMFVAR,$TEXMFHOME,!!$TEXMFLOCAL,!!$TEXMFSYSCONFIG,!!$TEXMFSYSVAR,!!$TEXMFMAIN,!!$TEXMFDIST}
-
-% PERFORMANCE TUNING
-
-% Enable SyncTeX
-synctex = 1
-
-% Quiet mode (less output)
-interaction = nonstopmode

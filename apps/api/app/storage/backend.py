@@ -1,273 +1,308 @@
 """
-Storage backend interface for file storage.
-Abstracts R2/S3 implementation.
+Storage backend interface.
+
+Abstraction over object storage (Cloudflare R2 / S3) with a local filesystem
+fallback for development.
+
+Key handling: storage keys are derived from server-side data (project UUID +
+content hash), never taken raw from the client. `safe_key()` re-validates
+anyway, because a traversal here would escape the storage root.
 """
 import hashlib
 import logging
+import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from pathlib import Path
+from typing import Any
 
-import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
+class StorageError(RuntimeError):
+    """Storage operation failed."""
+
+
 class StorageBackend(ABC):
     """Abstract storage interface."""
-    
+
     @abstractmethod
     async def put(
         self,
         key: str,
         data: bytes,
-        content_type: str = "application/octet-stream"
+        content_type: str = "application/octet-stream",
     ) -> str:
         """
-        Store file and return storage key.
-        
-        Args:
-            key: Storage key (path)
-            data: File content
-            content_type: MIME type
-        
-        Returns:
-            Storage key
+        Store an object and return its key.
+
+        Raises:
+            StorageError: on any backend failure.
         """
-        pass
-    
+
     @abstractmethod
     async def get(self, key: str) -> bytes:
-        """Retrieve file content."""
-        pass
-    
+        """
+        Retrieve object content.
+
+        Raises:
+            StorageError: when the key is missing or unreadable.
+        """
+
     @abstractmethod
     async def delete(self, key: str) -> None:
-        """Delete file."""
-        pass
-    
+        """Delete an object. Deleting a missing key is not an error."""
+
     @abstractmethod
-    async def get_presigned_url(
-        self,
-        key: str,
-        expires: int = 3600
-    ) -> str:
+    async def get_presigned_url(self, key: str, expires: int = 3600) -> str:
         """
-        Get presigned URL for direct download.
-        
-        Args:
-            key: Storage key
-            expires: URL expiration in seconds
-        
-        Returns:
-            Presigned URL
+        Get a time-limited direct download URL.
+
+        Raises:
+            StorageError: when a URL cannot be generated.
         """
-        pass
-    
+
     @staticmethod
     def compute_hash(data: bytes) -> str:
-        """Compute SHA256 hash of data."""
+        """Compute the SHA256 content hash used for deduplication."""
         return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def build_key(project_id: Any, file_hash: str, filename: str) -> str:
+        """
+        Build a deterministic, content-addressed key.
+
+        Content addressing means re-uploading identical bytes reuses one
+        object, and a changed file produces a new key instead of mutating an
+        object another file may still reference.
+        """
+        from app.files.schemas import validate_project_path
+
+        safe_name = validate_project_path(filename)
+        return f"{project_id}/{file_hash[:2]}/{file_hash}/{safe_name}"
+
+    @staticmethod
+    def safe_key(key: str) -> str:
+        """
+        Reject keys that could escape the storage root.
+
+        Raises:
+            StorageError: on absolute paths, traversal, or control characters.
+        """
+        if not key or not isinstance(key, str):
+            raise StorageError("Invalid storage key")
+        if key.startswith("/") or "\\" in key or "\x00" in key:
+            raise StorageError("Invalid storage key")
+        if any(part in ("", ".", "..") for part in key.split("/")):
+            raise StorageError("Invalid storage key")
+        if len(key) > 1024:
+            raise StorageError("Storage key too long")
+        return key
 
 
 class R2Storage(StorageBackend):
-    """
-    Cloudflare R2 storage backend.
-    S3-compatible API.
-    """
-    
+    """Cloudflare R2 (S3-compatible) storage backend."""
+
     def __init__(
         self,
         account_id: str,
         access_key_id: str,
         secret_access_key: str,
-        bucket_name: str
-    ):
+        bucket_name: str,
+    ) -> None:
+        if not account_id or not access_key_id or not secret_access_key:
+            raise StorageError("R2 credentials are incomplete")
         self.account_id = account_id
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.bucket_name = bucket_name
         self.endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
-    
+
+    def _client(self) -> Any:
+        """Create an aioboto3 S3 client factory scoped to this account."""
+        try:
+            import aioboto3
+        except ImportError as exc:  # pragma: no cover - dependency is declared
+            raise StorageError("aioboto3 is required for R2 storage") from exc
+
+        session = aioboto3.Session()
+        return session.client(
+            "s3",
+            endpoint_url=self.endpoint,
+            aws_access_key_id=self.access_key_id,
+            aws_secret_access_key=self.secret_access_key,
+            region_name="auto",
+        )
+
     async def put(
         self,
         key: str,
         data: bytes,
-        content_type: str = "application/octet-stream"
+        content_type: str = "application/octet-stream",
     ) -> str:
-        """Upload to R2."""
-        # Use boto3-compatible client
+        """Upload an object to R2."""
+        safe = self.safe_key(key)
         try:
-            import aioboto3
-            
-            session = aioboto3.Session()
-            async with session.client(
-                's3',
-                endpoint_url=self.endpoint,
-                aws_access_key_id=self.access_key_id,
-                aws_secret_access_key=self.secret_access_key
-            ) as s3:
+            async with self._client() as s3:
                 await s3.put_object(
                     Bucket=self.bucket_name,
-                    Key=key,
+                    Key=safe,
                     Body=data,
-                    ContentType=content_type
+                    ContentType=content_type,
+                    # Server-side encryption at rest.
+                    ServerSideEncryption="AES256",
                 )
-            
-            logger.info(f"Uploaded {key} to R2 ({len(data)} bytes)")
-            return key
-        
-        except ImportError:
-            # Fallback: use httpx with S3 API (requires signing)
-            logger.warning("aioboto3 not installed, using basic HTTP")
-            # TODO: Implement S3 signature v4
-            raise NotImplementedError("Install aioboto3 for R2 support")
-    
+        except Exception as exc:
+            logger.error("R2 put(%s) failed: %s", safe, exc)
+            raise StorageError("Failed to store object") from exc
+
+        logger.info("Stored %s in R2 (%d bytes)", safe, len(data))
+        return safe
+
     async def get(self, key: str) -> bytes:
-        """Download from R2."""
+        """Download an object from R2."""
+        safe = self.safe_key(key)
         try:
-            import aioboto3
-            
-            session = aioboto3.Session()
-            async with session.client(
-                's3',
-                endpoint_url=self.endpoint,
-                aws_access_key_id=self.access_key_id,
-                aws_secret_access_key=self.secret_access_key
-            ) as s3:
-                response = await s3.get_object(
-                    Bucket=self.bucket_name,
-                    Key=key
-                )
-                data = await response['Body'].read()
-                return data
-        
-        except ImportError:
-            raise NotImplementedError("Install aioboto3 for R2 support")
-    
+            async with self._client() as s3:
+                response = await s3.get_object(Bucket=self.bucket_name, Key=safe)
+                body = response["Body"]
+                data: bytes = await body.read()
+        except Exception as exc:
+            logger.error("R2 get(%s) failed: %s", safe, exc)
+            raise StorageError("Failed to read object") from exc
+        return data
+
     async def delete(self, key: str) -> None:
-        """Delete from R2."""
+        """Delete an object from R2."""
+        safe = self.safe_key(key)
         try:
-            import aioboto3
-            
-            session = aioboto3.Session()
-            async with session.client(
-                's3',
-                endpoint_url=self.endpoint,
-                aws_access_key_id=self.access_key_id,
-                aws_secret_access_key=self.secret_access_key
-            ) as s3:
-                await s3.delete_object(
-                    Bucket=self.bucket_name,
-                    Key=key
-                )
-            
-            logger.info(f"Deleted {key} from R2")
-        
-        except ImportError:
-            raise NotImplementedError("Install aioboto3 for R2 support")
-    
-    async def get_presigned_url(
-        self,
-        key: str,
-        expires: int = 3600
-    ) -> str:
-        """Generate presigned URL."""
+            async with self._client() as s3:
+                await s3.delete_object(Bucket=self.bucket_name, Key=safe)
+        except Exception as exc:
+            # A failed cleanup must not fail the user's request; the object is
+            # content-addressed so it is unreachable but harmless.
+            logger.warning("R2 delete(%s) failed: %s", safe, exc)
+            return
+        logger.info("Deleted %s from R2", safe)
+
+    async def get_presigned_url(self, key: str, expires: int = 3600) -> str:
+        """Generate a presigned GET URL."""
+        safe = self.safe_key(key)
         try:
-            import aioboto3
-            
-            session = aioboto3.Session()
-            async with session.client(
-                's3',
-                endpoint_url=self.endpoint,
-                aws_access_key_id=self.access_key_id,
-                aws_secret_access_key=self.secret_access_key
-            ) as s3:
-                url = await s3.generate_presigned_url(
-                    'get_object',
-                    Params={
-                        'Bucket': self.bucket_name,
-                        'Key': key
-                    },
-                    ExpiresIn=expires
+            async with self._client() as s3:
+                url: str = await s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": self.bucket_name, "Key": safe},
+                    ExpiresIn=max(1, min(expires, 604_800)),
                 )
-                return url
-        
-        except ImportError:
-            # Return public URL (works if bucket is public)
-            return f"{self.endpoint}/{self.bucket_name}/{key}"
+        except Exception as exc:
+            logger.error("R2 presign(%s) failed: %s", safe, exc)
+            raise StorageError("Failed to generate download URL") from exc
+        return url
 
 
 class LocalStorage(StorageBackend):
     """
-    Local filesystem storage (development only).
-    NOT for production use.
+    Local filesystem storage for development.
+
+    Development only: files are world-readable on the host and are not
+    encrypted. Every key is resolved against the base path, so a crafted key
+    cannot read or write outside the storage root.
     """
-    
-    def __init__(self, base_path: str = "/tmp/likhitex_storage"):
-        import os
-        self.base_path = base_path
-        os.makedirs(base_path, exist_ok=True)
-    
+
+    def __init__(self, base_path: str | None = None) -> None:
+        self.base_path = Path(base_path or settings.LOCAL_STORAGE_PATH).resolve()
+        self.base_path.mkdir(parents=True, exist_ok=True)
+
+    def _resolve(self, key: str) -> Path:
+        """
+        Map a storage key to an absolute path inside the storage root.
+
+        Raises:
+            StorageError: when the resolved path escapes the root.
+        """
+        safe = self.safe_key(key)
+        candidate = (self.base_path / safe).resolve()
+        if candidate != self.base_path and self.base_path not in candidate.parents:
+            raise StorageError("Storage key resolves outside the storage root")
+        return candidate
+
     async def put(
         self,
         key: str,
         data: bytes,
-        content_type: str = "application/octet-stream"
+        content_type: str = "application/octet-stream",
     ) -> str:
-        """Save to local filesystem."""
-        import os
-        
-        file_path = os.path.join(self.base_path, key)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        with open(file_path, 'wb') as f:
-            f.write(data)
-        
-        logger.info(f"Saved {key} to local storage ({len(data)} bytes)")
+        """Write an object to disk."""
+        target = self._resolve(key)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Write to a temp file then rename, so a reader never observes a
+            # partially written object.
+            temporary = target.with_suffix(target.suffix + ".partial")
+            temporary.write_bytes(data)
+            os.replace(temporary, target)
+        except OSError as exc:
+            logger.error("Local put(%s) failed: %s", key, exc)
+            raise StorageError("Failed to store object") from exc
+
+        logger.info("Stored %s locally (%d bytes)", key, len(data))
         return key
-    
+
     async def get(self, key: str) -> bytes:
-        """Read from local filesystem."""
-        import os
-        
-        file_path = os.path.join(self.base_path, key)
-        with open(file_path, 'rb') as f:
-            return f.read()
-    
+        """Read an object from disk."""
+        target = self._resolve(key)
+        if not target.is_file():
+            raise StorageError("Object not found")
+        try:
+            return target.read_bytes()
+        except OSError as exc:
+            logger.error("Local get(%s) failed: %s", key, exc)
+            raise StorageError("Failed to read object") from exc
+
     async def delete(self, key: str) -> None:
-        """Delete from local filesystem."""
-        import os
-        
-        file_path = os.path.join(self.base_path, key)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"Deleted {key} from local storage")
-    
-    async def get_presigned_url(
-        self,
-        key: str,
-        expires: int = 3600
-    ) -> str:
-        """Return local file path (not a real URL)."""
-        import os
-        return f"file://{os.path.join(self.base_path, key)}"
+        """Delete an object from disk."""
+        target = self._resolve(key)
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Local delete(%s) failed: %s", key, exc)
+            return
+        logger.info("Deleted %s locally", key)
+
+    async def get_presigned_url(self, key: str, expires: int = 3600) -> str:
+        """Return a local file URI (not a network URL)."""
+        target = self._resolve(key)
+        return target.as_uri()
+
+
+_storage_backend: StorageBackend | None = None
 
 
 def get_storage() -> StorageBackend:
     """
-    Factory function to get storage backend.
-    
-    Returns:
-        StorageBackend instance based on configuration
+    FastAPI dependency returning the configured storage backend.
+
+    The instance is cached: creating an S3 client per request would rebuild
+    the connection pool on every call.
     """
-    if settings.R2_ACCOUNT_ID and settings.R2_ACCESS_KEY_ID:
-        return R2Storage(
-            account_id=settings.R2_ACCOUNT_ID,
-            access_key_id=settings.R2_ACCESS_KEY_ID,
-            secret_access_key=settings.R2_SECRET_ACCESS_KEY,
-            bucket_name=settings.R2_BUCKET_NAME
-        )
-    else:
-        logger.warning("R2 not configured, using local storage (DEV ONLY)")
-        return LocalStorage()
+    global _storage_backend
+    if _storage_backend is None:
+        if settings.R2_REQUIRED_OK:
+            _storage_backend = R2Storage(
+                account_id=settings.R2_ACCOUNT_ID,
+                access_key_id=settings.R2_ACCESS_KEY_ID,
+                secret_access_key=settings.R2_SECRET_ACCESS_KEY,
+                bucket_name=settings.R2_BUCKET_NAME,
+            )
+        else:
+            logger.warning("R2 not configured; using local storage (DEVELOPMENT ONLY)")
+            _storage_backend = LocalStorage()
+    return _storage_backend
+
+
+def reset_storage() -> None:
+    """Drop the cached backend (used by tests)."""
+    global _storage_backend
+    _storage_backend = None

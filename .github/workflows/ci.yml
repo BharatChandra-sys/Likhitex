@@ -76,29 +76,33 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: './apps/web/package-lock.json'
+          cache-dependency-path: './frontend/package-lock.json'
       
       - name: Install dependencies
-        working-directory: ./apps/web
+        working-directory: ./frontend
         run: npm ci
       
       - name: Lint
-        working-directory: ./apps/web
+        working-directory: ./frontend
         run: npm run lint
       
       - name: Type check
-        working-directory: ./apps/web
-        run: npm run type-check
+        working-directory: ./frontend
+        run: npm run typecheck
+      
+      - name: Test
+        working-directory: ./frontend
+        run: npm test
       
       - name: Build
-        working-directory: ./apps/web
+        working-directory: ./frontend
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000
           NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_placeholder
         run: npm run build
       
       - name: Security audit
-        working-directory: ./apps/web
+        working-directory: ./frontend
         run: npm audit --audit-level=high
 
   # Secret scanning

@@ -1,80 +1,89 @@
 """
 Alembic environment configuration.
+
+Runs migrations asynchronously through the same engine settings the app uses,
+so a migration cannot succeed against a URL the application cannot reach.
 """
+
 import asyncio
 from logging.config import fileConfig
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
-
-# Import models so Alembic can detect schema
-from app.db.base import Base
-from app.db import models  # noqa: F401
 from app.config import settings
+from app.db import models  # noqa: F401  (registers tables on Base.metadata)
+from app.db.base import Base
 
-# Alembic Config object
 config = context.config
 
-# Setup logging
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Target metadata for 'autogenerate'
 target_metadata = Base.metadata
 
-# Set database URL from app config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Always migrate with the async driver; a sync URL would silently use a driver
+# the application itself never uses.
+config.set_main_option("sqlalchemy.url", settings.sqlalchemy_database_url)
+
+
+def _include_object(object_, name, type_, reflected, compare_to) -> bool:  # noqa: ANN001
+    """Keep Alembic focused on tables this app owns."""
+    if type_ == "table" and name in {"alembic_version", "spatial_ref_sys"}:
+        return False
+    return True
+
+
+def _migration_context(connection: Connection | None = None, **kwargs) -> None:  # noqa: ANN003
+    """Shared configuration for offline and online modes."""
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=_include_object,
+        compare_type=True,
+        compare_server_default=True,
+        # Server defaults keep the schema valid for rows inserted outside the app.
+        render_as_batch=connection is not None and connection.dialect.name == "sqlite",
+        **kwargs,
+    )
 
 
 def run_migrations_offline() -> None:
-    """
-    Run migrations in 'offline' mode.
-    No database connection needed, generates SQL script.
-    """
-    url = config.get_main_option("sqlalchemy.url")
-    context.configure(
-        url=url,
-        target_metadata=target_metadata,
+    """Emit SQL to stdout without connecting to a database."""
+    _migration_context(
+        url=config.get_main_option("sqlalchemy.url"),
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Run migrations with given connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
-
+    """Run migrations on an established connection."""
+    _migration_context(connection)
     with context.begin_transaction():
         context.run_migrations()
 
 
 async def run_async_migrations() -> None:
-    """Run migrations in async mode (for asyncpg)."""
-    # Use async engine
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    """Connect asynchronously and run migrations."""
+    connectable = create_async_engine(
+        config.get_main_option("sqlalchemy.url"),
         poolclass=pool.NullPool,
-        future=True,
+        echo=settings.DB_ECHO,
     )
-
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:
-    """
-    Run migrations in 'online' mode.
-    Uses actual database connection.
-    """
+    """Entry point for online mode."""
     asyncio.run(run_async_migrations())
 
 

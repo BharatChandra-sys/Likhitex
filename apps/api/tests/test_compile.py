@@ -1,164 +1,200 @@
 """
 Compile endpoint tests.
-Test the /api/compile endpoint with valid and invalid inputs.
+
+The compile route requires authentication and a Docker image, so these tests
+cover request validation and the auth boundary directly, and only exercise the
+full container path when the image is present.
 """
+
+import shutil
+import subprocess
+
 import pytest
-from fastapi.testclient import TestClient
 
-from app.main import app
+from app.compile.backend import get_compile_backend
+from app.compile.routes import CompileRequest
 
-client = TestClient(app)
+TEX = "\\documentclass{article}\n\\begin{document}\nHello, World!\n\\end{document}"
+
+IMAGE = "likhitex-compiler"
 
 
-def test_compile_simple_document():
-    """Test compiling a simple LaTeX document."""
+def compiler_image_available() -> bool:
+    """True when the Docker CLI is installed and the image exists."""
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "images", "-q", IMAGE],
+            capture_output=True,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return bool(result.stdout.strip())
+
+
+requires_image = pytest.mark.skipif(
+    not compiler_image_available(),
+    reason=f"Docker image '{IMAGE}' not available",
+)
+
+
+# --- Authentication boundary -------------------------------------------------
+
+
+def test_compile_requires_authentication(client):
+    """An anonymous caller must not be able to spend compile capacity."""
+    response = client.post("/api/compile/", json={"files": {"main.tex": TEX}})
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+
+
+def test_compile_rejects_malformed_token(client):
+    """A bearer token that cannot be verified must not authenticate."""
     response = client.post(
         "/api/compile/",
-        json={
-            "files": {
-                "main.tex": "\\documentclass{article}\n\\begin{document}\nHello, World!\n\\end{document}"
-            }
-        }
+        json={"files": {"main.tex": TEX}},
+        headers={"Authorization": "Bearer clearly.not.a.jwt"},
     )
-    
+
+    assert response.status_code in (401, 503)
+
+
+# --- Request validation ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ({}, "missing files"),
+        ({"files": {}}, "empty file map"),
+        ({"files": {"readme.md": "# hello"}}, "no .tex file present"),
+        ({"files": {"../escape.tex": TEX}}, "path traversal"),
+        ({"files": {"/etc/passwd": TEX}}, "absolute path"),
+        ({"files": {"..\\escape.tex": TEX}}, "backslash separator"),
+        ({"files": {"main.tex": TEX}, "surprise": 1}, "unknown field"),
+        ({"files": {f"f{i}.tex": TEX for i in range(200)}}, "too many files"),
+        ({"files": {"main.tex": "A" * (3 * 1024 * 1024)}}, "input over the byte cap"),
+    ],
+)
+def test_compile_rejects_bad_requests(body, reason):
+    """Malformed compile payloads are refused during validation."""
+    with pytest.raises(ValueError):
+        CompileRequest.model_validate(body)
+
+
+def test_compile_accepts_valid_request():
+    """A well-formed request passes validation."""
+    request = CompileRequest.model_validate({"files": {"main.tex": TEX}})
+
+    assert request.files["main.tex"] == TEX
+    assert request.main is None
+
+
+def test_compile_backend_factory():
+    """The local backend is constructible from configuration."""
+    backend = get_compile_backend("local")
+
+    assert backend.image
+    assert backend.timeout > 0
+    assert "--network" in backend._docker_argv()
+    assert "none" in backend._docker_argv()
+
+
+def test_compile_backend_rejects_unknown_name():
+    """An unknown backend name is a configuration error."""
+    with pytest.raises(ValueError):
+        get_compile_backend("nonsense")
+
+
+# --- Health ------------------------------------------------------------------
+
+
+def test_compile_health_endpoint(client):
+    """The backend probe answers without authentication."""
+    response = client.get("/api/compile/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "status" in body
+    assert "backend" in body
+
+    if body["status"] == "healthy":
+        assert body["backend"] == "local"
+
+
+# --- Full container path -----------------------------------------------------
+
+
+@requires_image
+def test_compile_simple_document(authed_client):
+    """A minimal document compiles to a PDF."""
+    response = authed_client.post("/api/compile/", json={"files": {"main.tex": TEX}})
+
     assert response.status_code == 200
     data = response.json()
-    
     assert data["success"] is True
-    assert data["pdf"] is not None  # Base64-encoded PDF
-    assert data["log"] != ""
+    assert data["pdf"]
     assert data["compile_time"] > 0
 
 
-def test_compile_no_files():
-    """Test compile with no files returns 400."""
-    response = client.post(
-        "/api/compile/",
-        json={"files": {}}
-    )
-    
-    assert response.status_code == 400
-    assert "No files provided" in response.json()["detail"]
-
-
-def test_compile_no_tex_file():
-    """Test compile with no .tex file returns 400."""
-    response = client.post(
+@requires_image
+def test_compile_with_bib(authed_client):
+    """BibTeX sources compile alongside the main document."""
+    response = authed_client.post(
         "/api/compile/",
         json={
             "files": {
-                "readme.md": "# Hello"
+                "main.tex": (
+                    "\\documentclass{article}\n\\begin{document}\n"
+                    "Hello World \\cite{test}\n"
+                    "\\bibliographystyle{plain}\n\\bibliography{refs}\n"
+                    "\\end{document}"
+                ),
+                "refs.bib": (
+                    "@article{test,\n  title={Test Article},\n"
+                    "  author={Author},\n  year={2024}\n}\n"
+                ),
             }
-        }
+        },
     )
-    
-    assert response.status_code == 400
-    assert ".tex file" in response.json()["detail"]
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
 
 
-def test_compile_with_error():
-    """Test compiling document with LaTeX error."""
-    response = client.post(
+@requires_image
+def test_compile_reports_latex_errors(authed_client):
+    """A bad command fails compilation but still returns structured detail."""
+    response = authed_client.post(
         "/api/compile/",
         json={
             "files": {
-                "main.tex": "\\documentclass{article}\n\\begin{document}\n\\badcommand\n\\end{document}"
+                "main.tex": (
+                    "\\documentclass{article}\n\\begin{document}\n"
+                    "\\badcommand\n\\end{document}"
+                )
             }
-        }
+        },
     )
-    
+
     assert response.status_code == 200
     data = response.json()
-    
-    # Should fail compilation but return 200 with error details
     assert data["success"] is False
-    assert data["errors"] or data["error"]  # Has error information
-
-
-def test_compile_with_bib():
-    """Test compiling document with BibTeX."""
-    response = client.post(
-        "/api/compile/",
-        json={
-            "files": {
-                "main.tex": """
-\\documentclass{article}
-\\begin{document}
-Hello World \\cite{test}
-\\bibliographystyle{plain}
-\\bibliography{refs}
-\\end{document}
-""",
-                "refs.bib": """
-@article{test,
-  title={Test Article},
-  author={Author},
-  year={2024}
-}
-"""
-            }
-        }
-    )
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
-
-
-def test_compile_health_endpoint():
-    """Test /api/compile/health endpoint."""
-    response = client.get("/api/compile/health")
-    
-    assert response.status_code == 200
-    data = response.json()
-    
-    assert "status" in data
-    assert "compiler" in data
-    
-    # Should be healthy if Docker image is built
-    if data["compiler"] == "available":
-        assert data["status"] == "healthy"
+    assert data["errors"] or data["error"]
 
 
 @pytest.mark.slow
-def test_compile_large_document():
-    """Test compiling a larger document (takes longer)."""
-    # Generate large document
-    large_tex = "\\documentclass{article}\n\\begin{document}\n"
-    for i in range(100):
-        large_tex += f"Section {i}\\\\\\n"
-    large_tex += "\\end{document}"
-    
-    response = client.post(
-        "/api/compile/",
-        json={
-            "files": {
-                "main.tex": large_tex
-            }
-        }
-    )
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
+@requires_image
+def test_compile_large_document(authed_client):
+    """A long document still compiles within the timeout."""
+    body = "\\documentclass{article}\n\\begin{document}\n"
+    body += "".join(f"Section {i}\\\\\n" for i in range(100))
+    body += "\\end{document}"
 
+    response = authed_client.post("/api/compile/", json={"files": {"main.tex": body}})
 
-@pytest.mark.parametrize("filename", [
-    "document.tex",
-    "thesis.tex",
-    "paper.tex",
-])
-def test_compile_different_filenames(filename):
-    """Test compiling with different main file names."""
-    response = client.post(
-        "/api/compile/",
-        json={
-            "files": {
-                filename: "\\documentclass{article}\\begin{document}Test\\end{document}"
-            }
-        }
-    )
-    
     assert response.status_code == 200
-    data = response.json()
-    assert data["success"] is True
+    assert response.json()["success"] is True

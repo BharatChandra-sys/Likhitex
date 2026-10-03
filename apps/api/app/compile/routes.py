@@ -1,156 +1,241 @@
 """
-Compile API Routes
-Endpoints for LaTeX compilation.
+Compile API routes.
+
+Endpoint for LaTeX compilation. Requires authentication: compilation is the
+most expensive operation in the system, so an unauthenticated endpoint would
+hand out compute for free.
 """
+import asyncio
+import base64
 import logging
-from typing import Dict, Optional
+import re
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field, field_validator
 
-from app.compile.backend import get_compile_backend, CompileResult
+from app.auth.dependencies import get_current_user
+from app.compile.backend import CompileBackend, CompileResult, get_compile_backend
 from app.config import settings
+from app.db import User
+from app.middleware.rate_limit import RateLimitResult, rate_limit
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Bounds the number of containers running at once, so a burst of requests
+# cannot spawn unbounded Docker processes.
+_compile_slots = asyncio.Semaphore(max(1, settings.COMPILE_MAX_CONCURRENT))
+
+# Control characters and NUL are never valid in a project file path.
+_PATH_RE = re.compile(r"^[\w./@+()-]+$")
+
 
 class CompileRequest(BaseModel):
-    """Request body for /compile endpoint."""
-    files: Dict[str, str] = Field(
+    """Request body for the compile endpoint."""
+
+    model_config = {"extra": "forbid"}
+
+    files: dict[str, str] = Field(
         ...,
-        description="Dictionary mapping file paths to content",
-        example={
-            "main.tex": "\\documentclass{article}\\begin{document}Hello\\end{document}"
-        }
+        description="Mapping of file paths to text content",
+        examples=[{"main.tex": "\\documentclass{article}\\begin{document}Hi\\end{document}"}],
     )
-    main: Optional[str] = Field(
+    main: str | None = Field(
         None,
-        description="Main .tex file to compile (auto-detected if not specified)"
+        max_length=256,
+        description="Main .tex file to compile (auto-detected when omitted)",
     )
+
+    @field_validator("files")
+    @classmethod
+    def _validate_files(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError("No files provided")
+        if len(value) > settings.COMPILE_MAX_FILES:
+            raise ValueError(f"At most {settings.COMPILE_MAX_FILES} files per compile request")
+        # Nothing can compile without a source document, so reject it here
+        # rather than after the request has already been accepted.
+        if not any(name.endswith(".tex") for name in value):
+            raise ValueError("No .tex file found in project")
+
+        total = 0
+        for path, content in value.items():
+            if not _PATH_RE.match(path) or path.startswith("/") or ".." in path:
+                raise ValueError(f"Invalid file path: {path!r}")
+            if not content:
+                continue
+            total += len(content.encode("utf-8", errors="ignore"))
+            if total > settings.COMPILE_MAX_INPUT_BYTES:
+                raise ValueError(
+                    f"Compile input exceeds {settings.COMPILE_MAX_INPUT_BYTES} bytes"
+                )
+        return value
 
 
 class CompileResponse(BaseModel):
-    """Response from /compile endpoint."""
+    """Result of a LaTeX compilation."""
+
     success: bool
-    pdf: Optional[str] = Field(None, description="Base64-encoded PDF")
+    pdf: str | None = Field(None, description="Base64-encoded PDF")
     log: str = Field("", description="LaTeX compilation log")
-    synctex: Optional[str] = Field(None, description="Base64-encoded SyncTeX data")
-    errors: list[dict] = Field(default_factory=list)
-    warnings: list[dict] = Field(default_factory=list)
-    compile_time: float = Field(0.0, description="Compilation time in seconds")
-    error: Optional[str] = None
-    error_type: Optional[str] = None
+    synctex: str | None = Field(None, description="Base64-encoded SyncTeX data")
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    compile_time: float = Field(0.0, description="Wall-clock seconds")
+    error: str | None = None
+    error_type: str | None = None
 
 
-@router.post("/", response_model=CompileResponse)
+def _backend_or_503() -> CompileBackend:
+    """Resolve the configured backend, mapping misconfiguration to a 503."""
+    try:
+        return get_compile_backend(settings.COMPILE_BACKEND)
+    except (NotImplementedError, ValueError) as exc:
+        logger.error("Compile backend unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Compilation backend unavailable",
+        ) from exc
+
+
+@router.post(
+    "/",
+    response_model=CompileResponse,
+    dependencies=[Depends(get_current_user)],
+    summary="Compile a LaTeX document",
+)
 async def compile_latex(
-    request: CompileRequest,
-    http_request: Request
+    body: CompileRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    rate: RateLimitResult = Depends(
+        rate_limit("compile", limit=settings.RATE_LIMIT_COMPILE_PER_USER, window=60)
+    ),
 ) -> CompileResponse:
     """
-    Compile LaTeX document to PDF.
-    
-    **Security:**
-    - Runs in isolated Docker container
-    - Shell-escape disabled
-    - 60-second timeout enforced
-    - Resource limits applied
-    
-    **Example:**
-    ```json
-    {
-      "files": {
-        "main.tex": "\\\\documentclass{article}\\\\begin{document}Hello\\\\end{document}"
-      }
-    }
-    ```
+    Compile a LaTeX document to PDF.
+
+    **Security controls applied here:**
+    - Bearer authentication required (compilation is billable compute)
+    - Per-user rate limit from Redis
+    - File count and total input size caps
+    - Path traversal rejected before the container sees the request
+    - Concurrency capped, container has no network and no capabilities
+    - A 60s timeout, enforced both in-process and by the container runtime
     """
-    # TODO Phase 2: Add authentication
-    # TODO Phase 2: Check rate limits
-    # TODO Phase 2: Check user quota
-    
-    logger.info(f"Compile request with {len(request.files)} files")
-    
-    # Validate files
-    if not request.files:
-        raise HTTPException(status_code=400, detail="No files provided")
-    
-    # Check for at least one .tex file
-    tex_files = [f for f in request.files.keys() if f.endswith('.tex')]
+    request_id = getattr(request.state, "request_id", "unknown")
+    tex_files = [name for name in body.files if name.endswith(".tex")]
     if not tex_files:
-        raise HTTPException(status_code=400, detail="No .tex file found in project")
-    
-    # Get compile backend
-    backend = get_compile_backend(settings.COMPILE_BACKEND)
-    
-    # Compile
-    try:
-        result: CompileResult = await backend.compile(request.files)
-        
-        # Encode binary outputs as base64
-        import base64
-        pdf_b64 = base64.b64encode(result.pdf).decode() if result.pdf else None
-        synctex_b64 = base64.b64encode(result.synctex).decode() if result.synctex else None
-        
-        # Log result
-        if result.success:
-            logger.info(f"Compile succeeded in {result.compile_time:.2f}s")
-        else:
-            logger.warning(f"Compile failed: {result.error_message}")
-        
-        return CompileResponse(
-            success=result.success,
-            pdf=pdf_b64,
-            log=result.log,
-            synctex=synctex_b64,
-            errors=result.errors,
-            warnings=result.warnings,
-            compile_time=result.compile_time,
-            error=result.error_message,
-            error_type=result.error_type
-        )
-    
-    except Exception as e:
-        logger.error(f"Compile route error: {e}", exc_info=True)
         raise HTTPException(
-            status_code=500,
-            detail=f"Compilation failed: {str(e)}"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No .tex file found in project",
         )
 
+    backend = _backend_or_503()
+    logger.info(
+        "compile request=%s user=%s files=%d rate_remaining=%d",
+        request_id,
+        user.id,
+        len(body.files),
+        rate.remaining,
+    )
 
-@router.get("/health")
-async def compile_health():
-    """
-    Check if compiler is available.
-    Verifies Docker image exists.
-    """
-    import subprocess
-    
     try:
-        result = subprocess.run(
-            ["docker", "images", "-q", "likhitex-compiler"],
-            capture_output=True,
-            timeout=5
+        async with _compile_slots:
+            result: CompileResult = await backend.compile(dict(body.files))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # The message may contain host paths, so log it and return a generic
+        # body keyed by the request id instead.
+        logger.error("compile request=%s failed: %s", request_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Compilation service error",
+            headers={"X-Request-ID": request_id},
+        ) from exc
+
+    response = CompileResponse(
+        success=result.success,
+        pdf=base64.b64encode(result.pdf).decode() if result.pdf else None,
+        log=result.log,
+        synctex=base64.b64encode(result.synctex).decode() if result.synctex else None,
+        errors=result.errors,
+        warnings=result.warnings,
+        compile_time=result.compile_time,
+        error=result.error_message,
+        error_type=result.error_type,
+    )
+
+    if not result.success:
+        logger.info(
+            "compile request=%s user=%s failed type=%s",
+            request_id,
+            user.id,
+            result.error_type,
         )
-        
-        if result.stdout:
-            return {
-                "status": "healthy",
-                "compiler": "available",
-                "backend": settings.COMPILE_BACKEND
-            }
-        else:
+    else:
+        logger.info(
+            "compile request=%s user=%s ok in %.2fs",
+            request_id,
+            user.id,
+            result.compile_time,
+        )
+
+    return response
+
+
+@router.get("/health", summary="Report compiler availability")
+async def compile_health() -> dict[str, Any]:
+    """
+    Report whether the configured compile backend can be reached.
+
+    Never requires authentication so orchestrators can probe it.
+    """
+    backend_name = settings.COMPILE_BACKEND
+
+    if backend_name == "local":
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "images",
+                "-q",
+                settings.COMPILE_IMAGE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+        except FileNotFoundError:
             return {
                 "status": "unhealthy",
-                "compiler": "not_built",
-                "message": "Docker image 'likhitex-compiler' not found. Run: docker build -t likhitex-compiler apps/compiler/"
+                "backend": backend_name,
+                "reason": "docker_not_installed",
+                "message": "Docker CLI not found on the API host.",
             }
-    
-    except Exception as e:
+        except (TimeoutError, OSError) as exc:
+            return {
+                "status": "unhealthy",
+                "backend": backend_name,
+                "reason": type(exc).__name__,
+            }
+
+        if stdout.strip():
+            return {"status": "healthy", "backend": backend_name, "image": settings.COMPILE_IMAGE}
+
         return {
             "status": "unhealthy",
-            "compiler": "error",
-            "message": str(e)
+            "backend": backend_name,
+            "reason": "image_not_built",
+            "message": f"Build it with: docker build -t {settings.COMPILE_IMAGE} apps/compiler/",
         }
+
+    if not settings.COMPILE_REMOTE_ENDPOINT:
+        return {
+            "status": "unhealthy",
+            "backend": backend_name,
+            "reason": "remote_endpoint_unset",
+        }
+
+    return {"status": "healthy", "backend": backend_name}
