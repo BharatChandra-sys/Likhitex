@@ -30,6 +30,7 @@ ENV/
 *~
 .DS_Store
 .kiro/
+.stitch_likhitex/
 # Next.js
 apps/web/.next/
 apps/web/out/
