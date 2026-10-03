@@ -110,7 +110,12 @@ async def global_exception_handler(request, exc: Exception):
         )
 
 
-# TODO Phase 1: Add compile routes
+# Import routers
+from app.compile.routes import router as compile_router
+
+# Register routers
+app.include_router(compile_router, prefix="/api/compile", tags=["compile"])
+
 # TODO Phase 2: Add auth routes
 # TODO Phase 2: Add project routes
 # TODO Phase 2: Add file routes
