@@ -1,3 +1,5 @@
+<div align="center">
+
 # Likhitex
 
 ![Likhitex Logo](frontend/public/logo.png)
@@ -8,6 +10,8 @@ A private, invite-only collaborative LaTeX editor for trusted research groups an
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Required-blue.svg)](https://www.docker.com/)
+
+</div>
 
 ## Overview
 
