@@ -2,7 +2,9 @@
 FastAPI application entry point.
 """
 
+import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -19,6 +21,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import settings
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
+
+# Windows compatibility: use ProactorEventLoop for subprocess support
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL, logging.INFO),

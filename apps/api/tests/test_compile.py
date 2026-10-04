@@ -109,6 +109,72 @@ def test_compile_backend_rejects_unknown_name():
         get_compile_backend("nonsense")
 
 
+# --- Sandbox configuration ---------------------------------------------------
+
+
+def _flag_pairs(argv: list[str]) -> list[tuple[str, str]]:
+    """
+    Split a docker argv into (flag, value) pairs.
+
+    Boolean flags pair with an empty string, and repeated flags such as the two
+    `--tmpfs` mounts are kept as separate pairs so none is silently lost.
+    """
+    pairs: list[tuple[str, str]] = []
+    for index, token in enumerate(argv):
+        if not token.startswith("--"):
+            continue
+        following = argv[index + 1] if index + 1 < len(argv) else ""
+        pairs.append((token, "" if following.startswith("--") else following))
+    return pairs
+
+
+def test_local_backend_pins_isolation_flags():
+    """
+    Every isolation control the compiler relies on is present.
+
+    The container-level tests in `tests/security` assume this configuration.
+    Pinning it here means a control cannot be dropped without a red test, even
+    where Docker is unavailable to exercise the container directly.
+    """
+    pairs = _flag_pairs(get_compile_backend("local")._docker_argv())
+
+    for expected in [
+        ("--network", "none"),
+        ("--cap-drop", "ALL"),
+        ("--security-opt", "no-new-privileges"),
+    ]:
+        assert expected in pairs, f"missing isolation control: {expected[0]}"
+
+    # An immutable root filesystem confines every write to the tmpfs mounts.
+    assert ("--read-only", "") in pairs, "root filesystem is not read-only"
+
+    tmpfs = [value for flag, value in pairs if flag == "--tmpfs"]
+    assert len(tmpfs) == 2, f"expected two tmpfs mounts, got {tmpfs}"
+    for mount in tmpfs:
+        for option in ("rw", "noexec", "nosuid"):
+            assert option in mount, f"{mount} is missing {option}"
+        assert "size=" in mount, f"{mount} has no size ceiling"
+
+
+def test_local_backend_pins_resource_ceilings():
+    """One document must not be able to exhaust the API host."""
+    pairs = _flag_pairs(get_compile_backend("local")._docker_argv())
+    ulimits = [value for flag, value in pairs if flag == "--ulimit"]
+    singles = {flag: value for flag, value in pairs if flag not in ("--tmpfs", "--ulimit")}
+
+    assert int(singles["--pids-limit"]) > 0, "no PID ceiling"
+    assert singles["--memory"], "no memory ceiling"
+    # Swap is pinned equal to memory, otherwise the limit is only a soft hint
+    # and the container can still exceed it.
+    assert singles["--memory-swap"] == singles["--memory"], "swap allowance exceeds memory"
+    assert float(singles["--cpus"]) > 0, "no CPU ceiling"
+
+    # Both the output size and the file count are bounded, so a runaway document
+    # cannot fill the tmpfs or exhaust descriptors.
+    assert any(item.startswith("fsize=") for item in ulimits), "no output size ceiling"
+    assert any(item.startswith("nofile=") for item in ulimits), "no descriptor ceiling"
+
+
 # --- Health ------------------------------------------------------------------
 
 

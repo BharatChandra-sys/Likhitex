@@ -16,14 +16,13 @@ import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
+from app.compile.backend import LocalCompileBackend
+
 COMPILE_TIMEOUT_SECONDS = int(os.getenv("COMPILE_TIMEOUT_SECONDS", "60"))
 DOCKER_TIMEOUT = COMPILE_TIMEOUT_SECONDS + 30
-
-RUNNER_DIR = Path(__file__).resolve().parents[3] / "compiler"
 
 
 def _image_available() -> bool:
@@ -48,26 +47,18 @@ def run_compiler(input_data: dict) -> dict:
     """
     Run the compiler container with a job and return the parsed result.
 
-    Uses the same sandbox flags the API applies (see
-    `app/compile/backend.py`), so these tests exercise the real isolation
-    configuration rather than a laxer one.
+    The argument list is taken from the API's own backend rather than copied
+    here, so these tests exercise the isolation configuration that ships. A
+    hand-maintained copy had already fallen behind, missing the `--ulimit`
+    ceilings the API applies, which would have let a regression in those pass.
     """
+    argv = LocalCompileBackend(
+        image="likhitex-compiler", timeout=COMPILE_TIMEOUT_SECONDS
+    )._docker_argv()
+
     try:
         result = subprocess.run(
-            [
-                "docker", "run", "--rm", "-i",
-                "--network", "none",
-                "--read-only",
-                "--tmpfs", "/compile:rw,noexec,nosuid,size=100m",
-                "--tmpfs", "/tmp:rw,noexec,nosuid,size=50m",
-                "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges",
-                "--pids-limit", "50",
-                "--memory", "512m",
-                "--memory-swap", "512m",
-                "--cpus", "0.5",
-                "likhitex-compiler",
-            ],
+            argv,
             input=json.dumps(input_data).encode(),
             capture_output=True,
             timeout=DOCKER_TIMEOUT,

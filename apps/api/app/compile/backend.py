@@ -9,6 +9,8 @@ import asyncio
 import base64
 import json
 import logging
+import subprocess
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -128,43 +130,116 @@ class LocalCompileBackend(CompileBackend):
         payload = json.dumps({"files": _encode_files(files)}).encode("utf-8")
 
         logger.info("Starting local compile of %d file(s)", len(files))
-        process: asyncio.subprocess.Process | None = None
-
+        
+        # Windows compatibility: use subprocess.Popen with asyncio.to_thread
+        # instead of create_subprocess_exec which requires ProactorEventLoop
         try:
-            process = await asyncio.create_subprocess_exec(  # noqa: S603 - fixed argv, no shell
-                *self._docker_argv(),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError as exc:
-            logger.error("Docker CLI unavailable: %s", exc)
-            return self._failure("docker_not_available", "Docker CLI not found on API host")
+            if sys.platform == "win32":
+                # Windows: use subprocess.Popen in a thread
+                import threading
+                result_holder = {"stdout": None, "stderr": None, "error": None}
+                
+                def run_process():
+                    try:
+                        proc = subprocess.Popen(
+                            self._docker_argv(),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        stdout, stderr = proc.communicate(payload, timeout=self.timeout)
+                        result_holder["stdout"] = stdout
+                        result_holder["stderr"] = stderr
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        result_holder["error"] = "timeout"
+                    except FileNotFoundError as exc:
+                        result_holder["error"] = f"docker_not_found:{exc}"
+                    except Exception as exc:
+                        result_holder["error"] = f"internal_error:{exc}"
+                
+                thread = threading.Thread(target=run_process)
+                thread.start()
+                thread.join(timeout=self.timeout + 5)  # Give extra 5s grace period
+                
+                if thread.is_alive():
+                    logger.error("Compile thread did not finish")
+                    return CompileResult(
+                        success=False,
+                        pdf=None,
+                        log="",
+                        synctex=None,
+                        errors=[],
+                        warnings=[],
+                        compile_time=float(self.timeout),
+                        error_type="timeout",
+                        error_message=f"Compilation exceeded {self.timeout}s timeout",
+                    )
+                
+                if result_holder.get("error"):
+                    error = result_holder["error"]
+                    if error == "timeout":
+                        logger.error("Compile timed out after %ss", self.timeout)
+                        return CompileResult(
+                            success=False,
+                            pdf=None,
+                            log="",
+                            synctex=None,
+                            errors=[],
+                            warnings=[],
+                            compile_time=float(self.timeout),
+                            error_type="timeout",
+                            error_message=f"Compilation exceeded {self.timeout}s timeout",
+                        )
+                    elif error.startswith("docker_not_found"):
+                        logger.error("Docker CLI unavailable: %s", error)
+                        return self._failure("docker_not_available", "Docker CLI not found on API host")
+                    else:
+                        logger.error("Compile error: %s", error)
+                        return self._failure("internal_error", "Compilation transport failure")
+                
+                stdout = result_holder["stdout"]
+                stderr = result_holder["stderr"]
+            else:
+                # Unix: use asyncio subprocess
+                process: asyncio.subprocess.Process | None = None
+                try:
+                    process = await asyncio.create_subprocess_exec(  # noqa: S603 - fixed argv, no shell
+                        *self._docker_argv(),
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except FileNotFoundError as exc:
+                    logger.error("Docker CLI unavailable: %s", exc)
+                    return self._failure("docker_not_available", "Docker CLI not found on API host")
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(payload), timeout=self.timeout
-            )
-        except TimeoutError:
-            # The container has its own timeout, but if the host is starved we
-            # must not leave the container running: --rm only fires on exit.
-            await self._terminate(process)
-            logger.error("Compile timed out after %ss", self.timeout)
-            return CompileResult(
-                success=False,
-                pdf=None,
-                log="",
-                synctex=None,
-                errors=[],
-                warnings=[],
-                compile_time=float(self.timeout),
-                error_type="timeout",
-                error_message=f"Compilation exceeded {self.timeout}s timeout",
-            )
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(payload), timeout=self.timeout
+                    )
+                except TimeoutError:
+                    await self._terminate(process)
+                    logger.error("Compile timed out after %ss", self.timeout)
+                    return CompileResult(
+                        success=False,
+                        pdf=None,
+                        log="",
+                        synctex=None,
+                        errors=[],
+                        warnings=[],
+                        compile_time=float(self.timeout),
+                        error_type="timeout",
+                        error_message=f"Compilation exceeded {self.timeout}s timeout",
+                    )
+                except Exception as exc:
+                    await self._terminate(process)
+                    logger.error("Compile transport error: %s", exc, exc_info=True)
+                    return self._failure("internal_error", "Compilation transport failure")
+
         except Exception as exc:
-            await self._terminate(process)
-            logger.error("Compile transport error: %s", exc, exc_info=True)
-            return self._failure("internal_error", "Compilation transport failure")
+            logger.error("Unexpected compile error: %s", exc, exc_info=True)
+            return self._failure("internal_error", "Compilation system failure")
 
         if len(stdout) > MAX_STDOUT_BYTES:
             logger.error("Compiler stdout exceeded cap (%d bytes)", len(stdout))
