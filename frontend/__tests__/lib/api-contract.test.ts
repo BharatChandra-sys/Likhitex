@@ -30,11 +30,18 @@ let document: OpenApiDocument | null = null;
 let unreachable = false;
 
 try {
-  // No AbortSignal is passed on purpose: under vitest's jsdom environment the
-  // global AbortController produces a signal that Node's fetch rejects with
-  // "Expected signal to be an instance of AbortSignal". The suite's own test
-  // timeout bounds the request instead.
-  const response = await fetch(OPENAPI_URL);
+  // Bounded by a race rather than an AbortSignal: under vitest's jsdom
+  // environment the global AbortController produces a signal that Node's fetch
+  // rejects with "Expected signal to be an instance of AbortSignal". Without
+  // this bound, a host that drops the connection instead of refusing it leaves
+  // the request pending for minutes, which stalls collection and reports the
+  // suite as skipped for the wrong reason.
+  const response = await Promise.race([
+    fetch(OPENAPI_URL),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("openapi.json did not respond in time")), 3000),
+    ),
+  ]);
   if (response.ok) document = (await response.json()) as OpenApiDocument;
   else unreachable = true;
 } catch {

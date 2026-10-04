@@ -31,6 +31,7 @@ export const SYMBOL_GROUPS: { title: string; symbols: SymbolEntry[] }[] = [
   {
     title: "Math",
     symbols: [
+      { glyph: "eq", latex: "\\begin{equation}\n\n\\end{equation}\n", label: "Equation" },
       { glyph: "∑", latex: "\\sum_{i=1}^{n} ", label: "Summation" },
       { glyph: "∫", latex: "\\int_{a}^{b} ", label: "Integral" },
       { glyph: "√", latex: "\\sqrt{} ", label: "Square root" },

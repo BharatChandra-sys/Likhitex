@@ -243,10 +243,27 @@ def user_email_from_claims(payload: dict[str, Any]) -> str | None:
 
 def user_name_from_claims(payload: dict[str, Any]) -> str | None:
     """Best-effort extraction of the user's display name from Clerk claims."""
-    for claim in ("name", "fullName", "username", "first_name"):
+    # Try top-level claims first (standard JWT fields)
+    for claim in ("name", "fullName", "full_name", "username", "first_name"):
         value = payload.get(claim)
         if isinstance(value, str) and value.strip():
             return value.strip()[:255]
+
+    # Clerk sometimes puts user info in publicMetadata
+    metadata = payload.get("publicMetadata") or payload.get("public_metadata") or payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("name", "fullName", "full_name"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:255]
+
+    # Build from first_name + last_name if available as separate claims
+    first = payload.get("given_name") or payload.get("firstName") or ""
+    last = payload.get("family_name") or payload.get("lastName") or ""
+    combined = f"{first} {last}".strip()
+    if combined:
+        return combined[:255]
+
     return None
 
 

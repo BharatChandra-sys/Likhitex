@@ -1,9 +1,13 @@
 import Image from "next/image";
 import Link from "next/link";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { CheckCircle, Lock, Users, Zap, Shield } from "lucide-react";
+import { CheckCircle, Lock, Users, Zap, Shield, FileText } from "lucide-react";
+import { currentUser } from "@clerk/nextjs/server";
+import { UserMenu } from "@/components/ui/user-menu";
 
-export default function LandingPage() {
+export default async function LandingPage() {
+  const user = await currentUser();
+
   return (
     <div className="min-h-screen bg-surface">
       {/* Sticky Navigation */}
@@ -29,9 +33,19 @@ export default function LandingPage() {
             </a>
           </div>
 
-          <Link href="/sign-in" className={buttonVariants({ variant: "primary", size: "md" })}>
-            Sign in
-          </Link>
+          {user ? (
+            <div className="flex items-center gap-3">
+              <Link href="/projects" className={buttonVariants({ variant: "primary", size: "md" })}>
+                <FileText className="w-4 h-4" />
+                Open Editor
+              </Link>
+              <UserMenu />
+            </div>
+          ) : (
+            <Link href="/sign-in" className={buttonVariants({ variant: "primary", size: "md" })}>
+              Sign in
+            </Link>
+          )}
         </div>
       </nav>
 
@@ -48,18 +62,47 @@ export default function LandingPage() {
               A private collaborative LaTeX editor for your group. Real-time editing,
               instant PDF preview, and secure sandboxed compilation.
             </p>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <Link href="/sign-in" className={buttonVariants({ variant: "primary", size: "lg", className: "w-full sm:w-auto" })}>
-                Sign in
-              </Link>
-              <Button variant="outline" size="lg" className="w-full sm:w-auto">
-                Request an invite
-              </Button>
-            </div>
-            <p className="text-xs text-on-surface-variant flex items-center gap-2">
-              <Lock className="w-3.5 h-3.5" />
-              Invite-only • 200 trusted members • Private workspace
-            </p>
+            {user ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 p-4 bg-primary-fixed/20 border border-primary/20 rounded-lg">
+                  <div className="w-10 h-10 rounded-full bg-primary text-white flex items-center justify-center font-semibold">
+                    {user.firstName?.[0] || user.emailAddresses[0]?.emailAddress[0].toUpperCase()}
+                  </div>
+                  <div>
+                    <p className="font-medium text-on-surface">
+                      Welcome back, {user.firstName || "there"}!
+                    </p>
+                    <p className="text-sm text-on-surface-variant">
+                      {user.emailAddresses[0]?.emailAddress}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Link href="/projects" className={buttonVariants({ variant: "primary", size: "lg", className: "w-full sm:w-auto" })}>
+                    <FileText className="w-4 h-4" />
+                    Open Editor
+                  </Link>
+                  <Button variant="outline" size="lg" className="w-full sm:w-auto">
+                    View My Projects
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Link href="/sign-in" className={buttonVariants({ variant: "primary", size: "lg", className: "w-full sm:w-auto" })}>
+                    Sign in
+                  </Link>
+                  <Button variant="outline" size="lg" className="w-full sm:w-auto">
+                    Request an invite
+                  </Button>
+                </div>
+                <p className="text-xs text-on-surface-variant flex items-center gap-2">
+                  <Lock className="w-3.5 h-3.5" />
+                  Invite-only • 200 trusted members • Private workspace
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Right: Editor Mock */}

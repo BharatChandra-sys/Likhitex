@@ -15,6 +15,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { api, ApiError } from "@/lib/api/client";
 import type {
   CompileResponse,
@@ -126,6 +127,7 @@ export function effectiveRole(
 }
 
 export function useEditorProject(projectId: string, userId: string | null): UseEditorProjectResult {
+  const { isLoaded: clerkLoaded, isSignedIn } = useAuth();
   const [project, setProject] = useState<ProjectDetailResponse | null>(null);
   const [files, setFiles] = useState<EditorFile[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -138,6 +140,20 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   const [isCompiling, setIsCompiling] = useState(false);
   const [compileResult, setCompileResult] = useState<CompileResponse | null>(null);
   const [compileError, setCompileError] = useState<string | null>(null);
+
+  // Load last compile result from localStorage on mount
+  useEffect(() => {
+    if (!projectId) return;
+    try {
+      const stored = localStorage.getItem(`compile_result_${projectId}`);
+      if (stored) {
+        const parsed = JSON.parse(stored) as CompileResponse;
+        setCompileResult(parsed);
+      }
+    } catch (err) {
+      console.warn("Failed to load stored compile result:", err);
+    }
+  }, [projectId]);
 
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
@@ -210,7 +226,13 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
 
   // Initial load: project metadata plus the file list.
   useEffect(() => {
-    if (!projectId) return;
+    // Wait for Clerk to load before making API calls
+    if (!clerkLoaded || !isSignedIn || !projectId) {
+      if (clerkLoaded && !isSignedIn) {
+        setIsLoading(false);
+      }
+      return;
+    }
 
     const controller = new AbortController();
     let cancelled = false;
@@ -247,7 +269,8 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
       cancelled = true;
       controller.abort();
     };
-  }, [projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clerkLoaded, isSignedIn, projectId]);
 
   /** Loads the selected file's content whenever the selection changes. */
   useEffect(() => {
@@ -456,10 +479,18 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   const createFile = useCallback(
     async (path: string, initialContent = "") => {
       try {
-        await api.uploadFile(projectId, { path, content: initialContent });
-        setContents((current) => ({ ...current, [path]: initialContent }));
+        // Check for duplicate file name
+        const normalizedPath = path.trim();
+        const existingFile = latest.current.files.find((f: EditorFile) => f.path === normalizedPath);
+        if (existingFile) {
+          setSaveError(`A file named "${normalizedPath}" already exists`);
+          return false;
+        }
+        
+        await api.uploadFile(projectId, { path: normalizedPath, content: initialContent });
+        setContents((current) => ({ ...current, [normalizedPath]: initialContent }));
         await refreshFiles();
-        setSelectedPath(path);
+        setSelectedPath(normalizedPath);
         return true;
       } catch (cause) {
         setSaveError(cause instanceof ApiError ? cause.message : "Could not create file");
@@ -569,6 +600,14 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
 
       const result = await api.compile({ files: payload });
       setCompileResult(result);
+      
+      // Persist to localStorage so it survives refresh
+      try {
+        localStorage.setItem(`compile_result_${projectId}`, JSON.stringify(result));
+      } catch (err) {
+        console.warn("Failed to store compile result:", err);
+      }
+      
       return result;
     } catch (cause) {
       setCompileError(

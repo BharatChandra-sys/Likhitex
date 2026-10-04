@@ -14,7 +14,13 @@
  */
 
 import { useEffect, useEffectEvent, useRef } from "react";
-import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
+import {
+  Compartment,
+  EditorSelection,
+  EditorState,
+  type ChangeSpec,
+  type Extension,
+} from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -27,7 +33,16 @@ import {
   highlightSpecialChars,
   placeholder as cmPlaceholder,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+  undo,
+  redo,
+  undoDepth,
+  redoDepth,
+} from "@codemirror/commands";
 import {
   bracketMatching,
   foldGutter,
@@ -39,11 +54,19 @@ import {
   StreamLanguage,
 } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { searchKeymap, highlightSelectionMatches, openSearchPanel } from "@codemirror/search";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import { tags as t } from "@lezer/highlight";
 
 import { extensionOf } from "@/lib/fileTree";
+import {
+  environmentAfterCaret,
+  hasClosingEnvironment,
+  itemContinuation,
+  planToggleComment,
+  planWrap,
+  type EditorCommand,
+} from "@/lib/latexInsert";
 
 /** Extensions that get the LaTeX/STeX parser; everything else is plain text. */
 const LATEX_EXTENSIONS = new Set(["tex", "sty", "cls", "ltx", "def", "cfg", "bib"]);
@@ -68,21 +91,48 @@ const highlightStyle = HighlightStyle.define([
   { tag: t.invalid, color: "#BA1A1A" },
 ]);
 
+/**
+ * Theme overrides that prevent blank space appearing when scrolling past the
+ * last line. By default the scroller fills its container and the content block
+ * is allowed to sit anywhere inside it; clamping the content height and removing
+ * the bottom padding stops the whitespace from appearing at both edges.
+ */
+const noOverscrollTheme = EditorView.theme({
+  "&": {
+    height: "100%",
+    overflow: "hidden",
+  },
+  ".cm-scroller": {
+    overflow: "auto",
+    height: "100%",
+  },
+  ".cm-content": {
+    paddingBottom: "0",
+    minHeight: "unset",
+  },
+  ".cm-gutters": {
+    minHeight: "unset",
+  },
+});
+
+/**
+ * A request to change the buffer from the toolbar.
+ *
+ * The nonce is what makes this usable: the user may click the same tool twice in
+ * a row, and without a discriminator the second click would be an identical prop
+ * and the effect would not fire again.
+ */
+export type { EditorCommand } from "@/lib/latexInsert";
+
+/** Whether undo and redo currently have anything to work on. */
+export interface HistoryState {
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
 export interface CursorPosition {
   line: number;
   column: number;
-}
-
-/**
- * A request to insert literal text at the caret.
- *
- * The nonce is what makes this usable: the user may click the same symbol twice
- * in a row, and without a discriminator the second click would be an identical
- * prop and the effect would not fire again.
- */
-export interface TextInsertRequest {
-  text: string;
-  nonce: number;
 }
 
 export interface CodeEditorProps {
@@ -102,14 +152,16 @@ export interface CodeEditorProps {
    */
   jumpToLine?: number | null;
   /**
-   * Inserts text at the caret when set, for the snippet and symbol toolbars.
+   * A toolbar edit to perform, e.g. wrap the selection in `\textbf{}`.
    *
-   * The insert runs here rather than in the parent for two reasons: the parent
-   * only knows the caret as a line and column, and pushing the new text back down
-   * as a whole-document replacement would discard the undo history that the
-   * insertion itself should be undoable as.
+   * The command runs here rather than in the parent for two reasons: the parent
+   * only knows the caret as a line and column, and pushing the resulting text
+   * back down as a whole-document replacement would discard the undo history that
+   * the edit itself should be undoable as.
    */
-  insertRequest?: TextInsertRequest | null;
+  command?: EditorCommand | null;
+  /** Reports whether undo and redo are available, so the toolbar can disable them. */
+  onHistoryChange?: (state: HistoryState) => void;
 }
 
 export default function CodeEditor({
@@ -120,7 +172,8 @@ export default function CodeEditor({
   onSave,
   onCursorChange,
   jumpToLine,
-  insertRequest,
+  command,
+  onHistoryChange,
 }: CodeEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -148,12 +201,84 @@ export default function CodeEditor({
     onCursorChange?.(position),
   );
   const emitSave = useEffectEvent(() => onSave?.());
+  /**
+   * Reports undo and redo availability to the toolbar.
+   *
+   * `undoDepth` and `redoDepth` are the authoritative view of the history stack,
+   * so the buttons reflect real state rather than an assumption that a fresh
+   * document can always be undone.
+   */
+  const emitHistory = useEffectEvent((canUndo: boolean, canRedo: boolean) =>
+    onHistoryChange?.({ canUndo, canRedo }),
+  );
 
   const languageFor = (filePath: string): Extension =>
     LATEX_EXTENSIONS.has(extensionOf(filePath))
       ? // `stex` is a StreamParser, not a LanguageSupport, so it needs wrapping.
         StreamLanguage.define(stex)
       : [];
+
+  /**
+   * Enter, taught about LaTeX.
+   *
+   * Two behaviours, both taken from the established editors: pressing Enter
+   * directly after `\begin{env}` opens a matching `\end{env}` and leaves the
+   * caret between them (TeXstudio's `\end` script), and Enter on a list item
+   * starts the next `\item` (LaTeX Workshop's auto-`\item`). Without these,
+   * every environment and list costs a trip to the end of the file to close.
+   *
+   * Runs before the default Enter binding and returns false when neither rule
+   * applies, so an ordinary newline behaves exactly as before.
+   */
+  const smartEnter = (view: EditorView): boolean => {
+    const { state } = view;
+    const range = state.selection.main;
+    // A range selection is a real selection the user means to act on.
+    if (!range.empty) return false;
+
+    const head = range.head;
+    const line = state.doc.lineAt(head);
+    const upToCaret = state.sliceDoc(line.from, head);
+    const indent = /^\s*/.exec(upToCaret)?.[0] ?? "";
+
+    const env = environmentAfterCaret(upToCaret);
+    // Only close what is not already closed somewhere in the document, or a
+    // second `\end` would be left behind as a compile error.
+    if (env && !hasClosingEnvironment(state.doc.toString(), env)) {
+      view.dispatch({
+        changes: {
+          from: head,
+          insert: `\n${indent}\t\n${indent}\\end{${env}}`,
+        },
+        selection: EditorSelection.cursor(head + 1 + indent.length + 1),
+        userEvent: "input",
+      });
+      return true;
+    }
+
+    const item = itemContinuation(line.text);
+    if (item?.action === "continue") {
+      view.dispatch({
+        changes: { from: head, insert: `\n${indent}\\item ` },
+        selection: EditorSelection.cursor(head + 1 + indent.length + "\\item ".length),
+        userEvent: "input",
+      });
+      return true;
+    }
+
+    if (item?.action === "clear") {
+      // A bare `\item` means the list is finished, so Enter replaces it with a
+      // plain indented line rather than adding another empty item.
+      view.dispatch({
+        changes: { from: line.from, to: head, insert: indent },
+        selection: EditorSelection.cursor(line.from + indent.length),
+        userEvent: "input",
+      });
+      return true;
+    }
+
+    return false;
+  };
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -181,6 +306,7 @@ export default function CodeEditor({
           keymap.of([
             // Returns true so CodeMirror does not also apply its default binding.
             { key: "Mod-s", run: () => (emitSave(), true) },
+            { key: "Enter", run: smartEnter },
             ...closeBracketsKeymap,
             ...defaultKeymap,
             ...searchKeymap,
@@ -193,6 +319,7 @@ export default function CodeEditor({
             EditorState.readOnly.of(readOnly),
             EditorView.editable.of(!readOnly),
           ]),
+          noOverscrollTheme,
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
               // Recorded here, not in the parent. The parent's `value` is, by
@@ -209,6 +336,11 @@ export default function CodeEditor({
               const line = update.state.doc.lineAt(head);
               emitCursor({ line: line.number, column: head - line.from + 1 });
             }
+            // Undo and redo availability moves with the history stack, which a
+            // plain edit changes even when the selection does not move.
+            if (update.docChanged || update.transactions.some((tr) => tr.isUserEvent("undo") || tr.isUserEvent("redo"))) {
+              emitHistory(undoDepth(update.state) > 0, redoDepth(update.state) > 0);
+            }
           }),
           cmPlaceholder("Start writing your LaTeX here\u2026"),
         ],
@@ -216,6 +348,9 @@ export default function CodeEditor({
     });
 
     viewRef.current = view;
+    // Seed the toolbar's undo/redo buttons, which start unavailable on a new
+    // document and would otherwise look actionable until the first keystroke.
+    emitHistory(undoDepth(view.state) > 0, redoDepth(view.state) > 0);
     return () => {
       view.destroy();
       viewRef.current = null;
@@ -282,28 +417,78 @@ export default function CodeEditor({
   }, [jumpToLine]);
 
   /**
-   * Insert toolbar text at the caret as a normal edit.
+   * Perform a toolbar command.
    *
-   * Replacing the selection rather than the empty range makes the insert respect
-   * an active selection, and the explicit cursor keeps the caret after the new
-   * text so consecutive inserts compose instead of stacking up in reverse.
+   * Every branch goes through one transaction so the whole action is a single
+   * undo step, and the caret is placed explicitly each time rather than left to
+   * CodeMirror, which would drop the selection it just wrote.
    */
   useEffect(() => {
     const view = viewRef.current;
-    if (!view || !insertRequest) return;
+    if (!view || !command) return;
 
-    const { from, to } = view.state.selection.main;
-    const head = from + insertRequest.text.length;
+    const { state } = view;
+    const { from, to } = state.selection.main;
+
+    if (command.kind === "undo" || command.kind === "redo") {
+      const applied = command.kind === "undo" ? undo(view) : redo(view);
+      if (applied) view.focus();
+      return;
+    }
+
+    if (command.kind === "find") {
+      openSearchPanel(view);
+      return;
+    }
+
+    if (command.kind === "insert") {
+      view.dispatch({
+        changes: { from, to, insert: command.text },
+        selection: EditorSelection.cursor(from + command.text.length),
+        userEvent: "input.snippet",
+      });
+      view.focus();
+      return;
+    }
+
+    if (command.kind === "wrap") {
+      const plan = planWrap(state.sliceDoc(from, to), command.open, command.close, command.placeholder);
+      view.dispatch({
+        changes: { from, to, insert: plan.text },
+        selection: EditorSelection.range(from + plan.selectionFrom, from + plan.selectionTo),
+        userEvent: "input.snippet",
+      });
+      view.focus();
+      return;
+    }
+
+    // Comments apply to whole lines, so the range is widened to line boundaries
+    // first; commenting a partial line is not a thing LaTeX has.
+    const firstLine = state.doc.lineAt(from);
+    const lastLine = state.doc.lineAt(to);
+    const lines: string[] = [];
+    for (let number = firstLine.number; number <= lastLine.number; number += 1) {
+      lines.push(state.doc.line(number).text);
+    }
+
+    const plan = planToggleComment(lines);
+    const changes: ChangeSpec[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      if (plan.lines[index] === lines[index]) continue;
+      const line = state.doc.line(firstLine.number + index);
+      changes.push({ from: line.from, to: line.to, insert: plan.lines[index] });
+    }
+    if (changes.length === 0) return;
 
     view.dispatch({
-      changes: { from, to, insert: insertRequest.text },
-      selection: EditorSelection.cursor(head),
-      // Tags the step so it is one entry in the undo history rather than being
-      // folded into the surrounding keystrokes.
+      changes,
+      // The lines move length, so the original range is no longer meaningful;
+      // collapsing to the start of the block keeps the view predictable.
+      selection: EditorSelection.cursor(firstLine.from),
       userEvent: "input.snippet",
     });
     view.focus();
-  }, [insertRequest]);
+  }, [command]);
 
   return (
     <div

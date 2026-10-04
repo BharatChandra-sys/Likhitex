@@ -7,6 +7,8 @@ hand out compute for free.
 """
 import asyncio
 import base64
+import hashlib
+import json
 import logging
 import re
 from typing import Any
@@ -15,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth.dependencies import get_current_user
+from app.cache.redis import get_redis_manager
 from app.compile.backend import CompileBackend, CompileResult, get_compile_backend
 from app.config import settings
 from app.db import User
@@ -30,6 +33,37 @@ _compile_slots = asyncio.Semaphore(max(1, settings.COMPILE_MAX_CONCURRENT))
 
 # Control characters and NUL are never valid in a project file path.
 _PATH_RE = re.compile(r"^[\w./@+()-]+$")
+
+
+def compute_compilation_fingerprint(files: dict[str, str]) -> str:
+    """
+    Compute hash of semantically significant content.
+    
+    Strips LaTeX comments and normalizes whitespace to detect real changes.
+    This allows cache hits for whitespace-only or comment-only edits.
+    
+    Args:
+        files: Mapping of file paths to content
+        
+    Returns:
+        SHA256 hash of normalized content
+    """
+    normalized = {}
+    
+    for path, content in files.items():
+        if path.endswith('.tex'):
+            # Strip LaTeX comments (lines starting with %)
+            clean = re.sub(r'%.*$', '', content, flags=re.MULTILINE)
+            # Normalize whitespace (spaces, tabs, newlines)
+            clean = re.sub(r'\s+', ' ', clean.strip())
+            normalized[path] = clean
+        else:
+            # Binary files or other formats: use as-is
+            normalized[path] = content
+    
+    # Sort by filename for consistency
+    canonical = json.dumps(normalized, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class CompileRequest(BaseModel):
@@ -109,6 +143,7 @@ def _backend_or_503() -> CompileBackend:
 async def compile_latex(
     body: CompileRequest,
     request: Request,
+    draft: bool = False,
     user: User = Depends(get_current_user),
     rate: RateLimitResult = Depends(
         rate_limit("compile", limit=settings.RATE_LIMIT_COMPILE_PER_USER, window=60)
@@ -117,6 +152,9 @@ async def compile_latex(
     """
     Compile a LaTeX document to PDF.
 
+    **Parameters:**
+    - draft: Skip image processing for faster compilation (default: False)
+
     **Security controls applied here:**
     - Bearer authentication required (compilation is billable compute)
     - Per-user rate limit from Redis
@@ -124,6 +162,9 @@ async def compile_latex(
     - Path traversal rejected before the container sees the request
     - Concurrency capped, container has no network and no capabilities
     - A 60s timeout, enforced both in-process and by the container runtime
+    
+    **Optimization:**
+    - Compilation fingerprinting: identical source returns cached PDF (instant)
     """
     request_id = getattr(request.state, "request_id", "unknown")
     tex_files = [name for name in body.files if name.endswith(".tex")]
@@ -134,17 +175,49 @@ async def compile_latex(
         )
 
     backend = _backend_or_503()
+    
+    # Compute fingerprint for caching
+    fingerprint = compute_compilation_fingerprint(body.files)
+    cache_key = f"compiled-pdf:{fingerprint}"
+    cached_result = None
+    
+    # Try to get from Redis cache (gracefully handle unavailable Redis)
+    try:
+        redis_mgr = get_redis_manager()
+        if redis_mgr.is_connected:
+            cached_data = await redis_mgr.get_json(cache_key)
+            if cached_data:
+                logger.info(
+                    "compile request=%s user=%s cache_hit=true fingerprint=%s",
+                    request_id, user.id, fingerprint[:12]
+                )
+                # Return cached result immediately
+                return CompileResponse(
+                    success=cached_data.get("success", True),
+                    pdf=cached_data.get("pdf"),
+                    log=cached_data.get("log", ""),
+                    synctex=cached_data.get("synctex"),
+                    errors=cached_data.get("errors", []),
+                    warnings=cached_data.get("warnings", []),
+                    compile_time=0.0,  # Cached, instant
+                    error=cached_data.get("error"),
+                    error_type=cached_data.get("error_type"),
+                )
+    except Exception as exc:
+        logger.warning("Cache lookup failed: %s", exc)
+    
     logger.info(
-        "compile request=%s user=%s files=%d rate_remaining=%d",
+        "compile request=%s user=%s files=%d draft=%s rate_remaining=%d cache_hit=false",
         request_id,
         user.id,
         len(body.files),
+        draft,
         rate.remaining,
     )
 
     try:
         async with _compile_slots:
-            result: CompileResult = await backend.compile(dict(body.files))
+            result: CompileResult = await backend.compile(dict(body.files), draft_mode=draft)
     except HTTPException:
         raise
     except Exception as exc:
@@ -169,6 +242,32 @@ async def compile_latex(
         error_type=result.error_type,
     )
 
+    # Cache successful compilations for 1 hour
+    if result.success:
+        try:
+            redis_mgr = get_redis_manager()
+            if redis_mgr.is_connected:
+                await redis_mgr.set_json(
+                    cache_key,
+                    {
+                        "success": result.success,
+                        "pdf": response.pdf,  # Already base64 encoded
+                        "log": result.log,
+                        "synctex": response.synctex,  # Already base64 encoded
+                        "errors": result.errors,
+                        "warnings": result.warnings,
+                        "error_type": result.error_type,
+                        "error": result.error_message,
+                    },
+                    ex=3600  # 1 hour
+                )
+                logger.info(
+                    "compile request=%s cached fingerprint=%s",
+                    request_id, fingerprint[:12]
+                )
+        except Exception as exc:
+            logger.warning("Cache store failed: %s", exc)
+
     if not result.success:
         logger.info(
             "compile request=%s user=%s failed type=%s",
@@ -178,10 +277,12 @@ async def compile_latex(
         )
     else:
         logger.info(
-            "compile request=%s user=%s ok in %.2fs",
+            "compile request=%s user=%s ok in %.2fs draft=%s engine=%s",
             request_id,
             user.id,
             result.compile_time,
+            draft,
+            result.extra.get('engine', 'unknown'),
         )
 
     return response

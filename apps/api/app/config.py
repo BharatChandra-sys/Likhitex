@@ -76,18 +76,19 @@ class Settings(BaseSettings):
     # Compile
     COMPILE_TIMEOUT_SECONDS: int = 60
     COMPILE_MAX_QUEUE_SIZE: int = 10
-    COMPILE_BACKEND: Literal["local", "remote"] = "local"
+    COMPILE_BACKEND: Literal["local", "remote", "direct"] = "direct"
     COMPILE_IMAGE: str = "likhitex-compiler"
-    COMPILE_MEMORY_LIMIT: str = "512m"
-    COMPILE_CPU_LIMIT: str = "0.5"
+    COMPILE_MEMORY_LIMIT: str = "1g"  # Increased from 512m for better performance
+    COMPILE_CPU_LIMIT: str = "2"  # Increased from 0.5 to allow parallel processing
     COMPILE_PIDS_LIMIT: int = 50
-    COMPILE_TMPFS_COMPILE: str = "100m"
-    COMPILE_TMPFS_TMP: str = "50m"
+    COMPILE_TMPFS_COMPILE: str = "200m"  # Increased from 100m for larger projects
+    COMPILE_TMPFS_TMP: str = "100m"  # Increased from 50m
     COMPILE_MAX_INPUT_BYTES: int = 2 * 1024 * 1024
     COMPILE_MAX_FILES: int = 50
     COMPILE_MAX_CONCURRENT: int = 4
     COMPILE_REMOTE_ENDPOINT: str = ""
     COMPILE_REMOTE_API_KEY: str = ""
+    COMPILE_DRAFT_MODE: bool = False  # Enable draft mode for faster compilation during editing
 
     # WebSocket / collaboration
     COLLAB_WS_URL: str = "ws://localhost:1234/collab"

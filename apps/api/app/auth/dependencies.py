@@ -87,12 +87,19 @@ async def get_current_user(
             )
 
         # Backfill a placeholder email once a real one becomes available.
-        if claim_email and user.email.endswith("@example.com"):
+        if claim_email and (user.email.endswith("@users.invalid") or user.email.endswith("@example.com")):
             conflict = await db.execute(
                 select(User.id).where(User.email == claim_email, User.id != user_id)
             )
             if conflict.scalar_one_or_none() is None:
                 user.email = claim_email
+                logger.info("Backfilled email for user %s", user_id)
+
+        # Backfill full_name from the JWT if the row was provisioned without one.
+        if user.full_name is None:
+            claim_name = user_name_from_claims(token_payload)
+            if claim_name:
+                user.full_name = claim_name
 
         now = utcnow()
         if user.last_login_at is None or (now - user.last_login_at) > LAST_LOGIN_REFRESH:

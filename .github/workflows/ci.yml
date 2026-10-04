@@ -149,15 +149,28 @@ jobs:
         with:
           python-version: '3.12'
       
-      - name: Install dependencies
+- name: Install dependencies
         working-directory: ./apps/api
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      
+
+      - name: Build compiler image
+        # The container-isolation tests skip unless this image exists, so without
+        # this step the whole suite silently reports green while testing nothing.
+        run: docker build -t likhitex-compiler apps/compiler/
+
       - name: Run security test suite
         working-directory: ./apps/api
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test_db
           SECRET_KEY: test_secret_key_minimum_32_chars_long
-        run: pytest tests/security/ -v --tb=short
+        run: |
+          set -o pipefail
+          pytest tests/security/ -v --tb=short | tee security-report.txt
+          # Skips must not pass here: they are how a whole isolation suite can
+          # go unreported, so treat any skip as a failure to investigate.
+          if grep -qE '^[0-9]+ skipped' security-report.txt; then
+            echo "::error::Security tests were skipped, so the isolation suite did not run"
+            exit 1
+          fi

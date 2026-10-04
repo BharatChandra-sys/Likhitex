@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { api, ApiError } from "@/lib/api/client";
 import type {
   ProjectListResponse,
@@ -50,6 +51,7 @@ const PAGE_SIZE = 20;
 const SEARCH_DEBOUNCE_MS = 300;
 
 export function useProjects(): UseProjectsResult {
+  const { isLoaded, isSignedIn } = useAuth();
   const [data, setData] = useState<ProjectListResponse | null>(null);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -62,10 +64,7 @@ export function useProjects(): UseProjectsResult {
   const requestIdRef = useRef(0);
   const [reloadToken, setReloadToken] = useState(0);
 
-  // Whether any response has landed yet. This is a ref rather than a derived
-  // boolean because it decides *how* to show loading (full state vs. dimmed
-  // table) without becoming an effect dependency -- depending on `data === null`
-  // would refetch once more as soon as the first response arrives.
+  // Whether any response has landed yet.
   const hasLoadedRef = useRef(false);
 
   // Debounce the search term into `appliedSearch`.
@@ -73,19 +72,21 @@ export function useProjects(): UseProjectsResult {
     if (search === appliedSearch) return;
     const timer = setTimeout(() => {
       setAppliedSearch(search);
-      // A new search always restarts at page 1; staying on page 7 of a narrower
-      // result set would show an empty table.
       setPage(1);
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [search, appliedSearch]);
 
   useEffect(() => {
+    // Wait until Clerk has loaded and the token provider is registered.
+    if (!isLoaded || !isSignedIn) {
+      if (isLoaded && !isSignedIn) setIsInitialLoading(false);
+      return;
+    }
+
     const requestId = ++requestIdRef.current;
     const controller = new AbortController();
 
-    // The first load has nothing to show behind it, so it gets the full state;
-    // later pages keep the current rows visible and just flag as refreshing.
     if (hasLoadedRef.current) setIsRefreshing(true);
     else setIsInitialLoading(true);
 
@@ -95,7 +96,7 @@ export function useProjects(): UseProjectsResult {
         { signal: controller.signal },
       )
       .then((response) => {
-        if (requestId !== requestIdRef.current) return; // superseded
+        if (requestId !== requestIdRef.current) return;
         hasLoadedRef.current = true;
         setData(response);
         setError(null);
@@ -116,7 +117,7 @@ export function useProjects(): UseProjectsResult {
       });
 
     return () => controller.abort();
-  }, [page, appliedSearch, reloadToken]);
+  }, [isLoaded, isSignedIn, page, appliedSearch, reloadToken]);
 
   const pageCount = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE_SIZE));
 
@@ -148,12 +149,23 @@ export interface UseCurrentUserResult {
 }
 
 export function useCurrentUser(): UseCurrentUserResult {
+  const { isLoaded, isSignedIn } = useAuth();
   const [user, setUser] = useState<UserResponse | null>(null);
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    // Wait until Clerk has loaded — otherwise the token provider isn't
+    // registered yet and every call returns 401.
+    if (!isLoaded) return;
+
+    // Not signed in: nothing to fetch.
+    if (!isSignedIn) {
+      setIsLoading(false);
+      return;
+    }
+
     const controller = new AbortController();
     let cancelled = false;
 
@@ -191,7 +203,7 @@ export function useCurrentUser(): UseCurrentUserResult {
       cancelled = true;
       controller.abort();
     };
-  }, []);
+  }, [isLoaded, isSignedIn]);
 
   return { user, quota, error, isLoading };
 }

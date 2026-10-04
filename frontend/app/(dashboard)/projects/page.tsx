@@ -166,9 +166,9 @@ export default function ProjectsDashboard() {
   );
 
   const handleRename = useCallback(
-    async (id: string, name: string) => {
-      await withPending([id], async () => {
-        await api.updateProject(id, { name });
+    async (project: ProjectResponse, newName: string) => {
+      await withPending([project.id], async () => {
+        await api.updateProject(project.id, { name: newName });
       });
       reload();
     },
@@ -190,18 +190,6 @@ export default function ProjectsDashboard() {
       }
     },
     [reload, withPending],
-  );
-
-  const handleRenamePrompt = useCallback(
-    (project: ProjectResponse) => {
-      const next = window.prompt("Rename project", project.name);
-      if (next && next.trim() && next.trim() !== project.name) {
-        void handleRename(project.id, next.trim()).catch((cause: unknown) => {
-          window.alert(cause instanceof ApiError ? cause.message : "Could not rename.");
-        });
-      }
-    },
-    [handleRename],
   );
 
   /** Opens the ZIP importer. */
@@ -333,8 +321,7 @@ export default function ProjectsDashboard() {
                   onSortChange={onSortChange}
                   isRefreshing={isRefreshing}
                   onOpenShare={(project) => setShareTarget(project)}
-                  onRename={handleRenamePrompt}
-                  // The API exposes no duplicate or ZIP-export endpoint, so
+                  onRename={(project, newName) => void handleRename(project, newName)}
                   // these are left unimplemented rather than faked.
                   onDuplicate={undefined}
                   onDownload={undefined}
@@ -348,7 +335,7 @@ export default function ProjectsDashboard() {
                   isRefreshing={isRefreshing}
                   pendingIds={pendingIds}
                   onOpenShare={(project) => setShareTarget(project)}
-                  onRename={handleRenamePrompt}
+                  onRename={(project, newName) => void handleRename(project, newName)}
                   onDelete={(project) => setDeleteTarget(project)}
                 />
               )}

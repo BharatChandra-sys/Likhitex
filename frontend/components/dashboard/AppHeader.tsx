@@ -11,10 +11,9 @@ import {
   LogOut,
   Settings,
   User as UserIcon,
-  Shield,
 } from "lucide-react";
 import type { QuotaResponse, UserResponse } from "@/lib/api/types";
-import { displayName, formatQuotaPair, initialsOf } from "@/lib/format";
+import { formatQuotaPair } from "@/lib/format";
 
 interface AppHeaderProps {
   user: UserResponse | null;
@@ -63,9 +62,28 @@ export default function AppHeader({
     };
   }, [isMenuOpen]);
 
-  const name = displayName(user?.full_name, user?.email) || displayName(clerkUser?.fullName, clerkUser?.primaryEmailAddress?.emailAddress);
-  const initials = initialsOf(user?.full_name, user?.email) || initialsOf(clerkUser?.fullName, clerkUser?.primaryEmailAddress?.emailAddress);
-  const userEmail = user?.email || clerkUser?.primaryEmailAddress?.emailAddress || "—";
+  // Prefer the API user's full_name, fall back to Clerk's user object which
+  // always has the real name from Google/OAuth.
+  const clerkFullName = clerkUser?.fullName || 
+    [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ");
+  const clerkEmail = clerkUser?.primaryEmailAddress?.emailAddress;
+
+  const name = (user?.full_name && user.full_name.trim())
+    ? user.full_name
+    : (clerkFullName || user?.email?.split("@")[0] || "User");
+  const initials = name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+
+  // Use Clerk's real email if the DB still has the placeholder.
+  const rawEmail = user?.email || clerkEmail || "—";
+  const userEmail = (rawEmail.endsWith("@users.invalid") || rawEmail.endsWith("@example.com"))
+    ? (clerkEmail || rawEmail)
+    : rawEmail;
+
   const userId = user?.id || clerkUser?.id || null;
   const usedPercent = quota ? Math.min(100, Math.max(0, quota.percentage_used)) : null;
 
@@ -185,56 +203,57 @@ export default function AppHeader({
           {isMenuOpen && (
             <div
               role="menu"
-              className="absolute right-0 top-10 w-[220px] bg-surface-container-lowest border border-[#E5E7EB] rounded-lg shadow-lg py-1 z-50"
+              className="absolute right-0 top-10 w-64 bg-white border border-[#E5E7EB] rounded-lg shadow-lg overflow-hidden z-50"
             >
-              <div className="px-3 py-2 border-b border-[#F3F4F6]">
-                <p className="text-xs font-semibold text-on-surface truncate">{name}</p>
-                <p className="text-[11px] text-outline truncate mb-1">
-                  {userEmail}
-                </p>
-                {userId && (
-                  <p className="text-[10px] font-[family-name:var(--font-mono)] text-outline truncate">
-                    ID: {userId.slice(0, 16)}...
-                  </p>
-                )}
+              {/* User Info Header */}
+              <div className="px-4 py-3 border-b border-[#F3F4F6]">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-primary text-white flex items-center justify-center font-semibold">
+                    {initials}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-sm text-on-surface truncate">
+                      {name}
+                    </p>
+                    <p className="text-xs text-on-surface-variant truncate">
+                      {userEmail}
+                    </p>
+                  </div>
+                </div>
               </div>
 
-              <Link
-                href="/settings"
-                role="menuitem"
-                onClick={() => setIsMenuOpen(false)}
-                className="flex items-center gap-2 px-3 py-2 text-xs text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface transition-colors"
-              >
-                <Settings className="w-4 h-4" />
-                Settings
-              </Link>
-              <div
-                role="menuitem"
-                aria-disabled="true"
-                title="Managed by the workspace administrator"
-                className="flex items-center gap-2 px-3 py-2 text-xs text-outline cursor-not-allowed"
-              >
-                <Shield className="w-4 h-4" />
-                Roles &amp; access
-              </div>
-              <div
-                role="menuitem"
-                aria-disabled="true"
-                className="flex items-center gap-2 px-3 py-2 text-xs text-outline cursor-not-allowed"
-              >
-                <UserIcon className="w-4 h-4" />
-                Invite member
-              </div>
+              {/* Menu Items */}
+              <div className="py-1">
+                <Link
+                  href="/projects"
+                  role="menuitem"
+                  onClick={() => setIsMenuOpen(false)}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-on-surface hover:bg-surface-container transition-colors"
+                >
+                  <UserIcon className="w-4 h-4 text-on-surface-variant" />
+                  <span>My Projects</span>
+                </Link>
 
-              <div className="border-t border-[#F3F4F6] mt-1 pt-1">
+                <Link
+                  href="/settings"
+                  role="menuitem"
+                  onClick={() => setIsMenuOpen(false)}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-on-surface hover:bg-surface-container transition-colors"
+                >
+                  <Settings className="w-4 h-4 text-on-surface-variant" />
+                  <span>Account Settings</span>
+                </Link>
+
+                <div className="border-t border-[#F3F4F6] my-1"></div>
+
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => void signOut({ redirectUrl: "/" })}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface transition-colors text-left"
+                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-error hover:bg-error/5 transition-colors text-left"
                 >
                   <LogOut className="w-4 h-4" />
-                  Sign out
+                  <span>Sign out</span>
                 </button>
               </div>
             </div>
