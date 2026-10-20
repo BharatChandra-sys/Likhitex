@@ -12,16 +12,21 @@ import json
 import logging
 import re
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import RequireViewer, get_current_user
 from app.cache.redis import get_redis_manager
-from app.compile.backend import CompileBackend, CompileResult, get_compile_backend
+from app.compile.backend import CompileBackend, CompileResult, FileMap, get_compile_backend
 from app.config import settings
-from app.db import User
+from app.db import File, User
+from app.db.base import get_db
 from app.middleware.rate_limit import RateLimitResult, rate_limit
+from app.storage.backend import StorageBackend, StorageError, get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +86,17 @@ class CompileRequest(BaseModel):
         max_length=256,
         description="Main .tex file to compile (auto-detected when omitted)",
     )
+    draft: bool = Field(
+        False,
+        description="Replace images with placeholders for faster compilation",
+    )
+    project_id: UUID | None = Field(
+        None,
+        description=(
+            "Project whose stored binary files (images, PDFs) are added to the "
+            "compile. Text files still come from `files`, so unsaved edits win."
+        ),
+    )
 
     @field_validator("files")
     @classmethod
@@ -122,6 +138,63 @@ class CompileResponse(BaseModel):
     error_type: str | None = None
 
 
+async def _project_assets(
+    db: AsyncSession, project_id: UUID, skip: set[str]
+) -> list[tuple[str, str, str]]:
+    """
+    (path, content hash, storage key) for the project's object-storage files.
+
+    Paths the client already sent as text are skipped: the request's copy is
+    what the user is looking at.
+    """
+    result = await db.execute(
+        select(File.path, File.hash, File.storage_key)
+        .where(File.project_id == project_id, File.storage_key.is_not(None))
+        .order_by(File.path)
+    )
+    return [
+        (path, file_hash, key)
+        for path, file_hash, key in result.all()
+        if key and path not in skip
+    ]
+
+
+async def _fetch_assets(
+    storage: StorageBackend, assets: list[tuple[str, str, str]]
+) -> dict[str, bytes]:
+    """
+    Download binary files for a compile, a few at a time.
+
+    A file that cannot be read is left out rather than failing the request:
+    pdflatex then reports it as a missing file in the log, which names it,
+    instead of the user getting an opaque 502.
+    """
+    limit = asyncio.Semaphore(4)
+    budget = settings.QUOTA_PER_PROJECT_MB * 1024 * 1024
+
+    async def fetch(path: str, key: str) -> tuple[str, bytes | None]:
+        async with limit:
+            try:
+                return path, await storage.get(key)
+            except StorageError:
+                logger.warning("Compile could not load %s from storage", path)
+                return path, None
+
+    fetched: dict[str, bytes] = {}
+    total = 0
+    for path, data in await asyncio.gather(*(fetch(p, k) for p, _, k in assets)):
+        if data is None:
+            continue
+        total += len(data)
+        if total > budget:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Project files exceed {settings.QUOTA_PER_PROJECT_MB} MB",
+            )
+        fetched[path] = data
+    return fetched
+
+
 def _backend_or_503() -> CompileBackend:
     """Resolve the configured backend, mapping misconfiguration to a 503."""
     try:
@@ -143,8 +216,9 @@ def _backend_or_503() -> CompileBackend:
 async def compile_latex(
     body: CompileRequest,
     request: Request,
-    draft: bool = False,
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage),
     rate: RateLimitResult = Depends(
         rate_limit("compile", limit=settings.RATE_LIMIT_COMPILE_PER_USER, window=60)
     ),
@@ -152,8 +226,8 @@ async def compile_latex(
     """
     Compile a LaTeX document to PDF.
 
-    **Parameters:**
-    - draft: Skip image processing for faster compilation (default: False)
+    **Body options:**
+    - draft: Replace images with placeholders for faster compilation (default: False)
 
     **Security controls applied here:**
     - Bearer authentication required (compilation is billable compute)
@@ -175,10 +249,21 @@ async def compile_latex(
         )
 
     backend = _backend_or_503()
+    draft = body.draft
 
-    # Compute fingerprint for caching
-    fingerprint = compute_compilation_fingerprint(body.files)
-    cache_key = f"compiled-pdf:{fingerprint}"
+    assets: list[tuple[str, str, str]] = []
+    if body.project_id is not None:
+        # Same check as the file routes: 404 for projects the caller cannot see.
+        project = await RequireViewer(project_id=body.project_id, user=user, db=db)
+        assets = await _project_assets(db, project.id, skip=set(body.files))
+
+    # Compute fingerprint for caching. The mode is part of the key: a draft PDF
+    # has placeholder images and must never be served for a full compile.
+    # Binary files enter by content hash, so replacing an image busts the cache.
+    fingerprint = compute_compilation_fingerprint(
+        {**body.files, **{path: f"sha256:{file_hash}" for path, file_hash, _ in assets}}
+    )
+    cache_key = f"compiled-pdf:{'draft' if draft else 'full'}:{fingerprint}"
 
     # Try to get from Redis cache (gracefully handle unavailable Redis)
     try:
@@ -205,18 +290,22 @@ async def compile_latex(
     except Exception as exc:
         logger.warning("Cache lookup failed: %s", exc)
 
+    compile_files: FileMap = dict(body.files)
+    compile_files.update(await _fetch_assets(storage, assets))
+
     logger.info(
-        "compile request=%s user=%s files=%d draft=%s rate_remaining=%d cache_hit=false",
+        "compile request=%s user=%s files=%d assets=%d draft=%s rate_remaining=%d cache_hit=false",
         request_id,
         user.id,
         len(body.files),
+        len(compile_files) - len(body.files),
         draft,
         rate.remaining,
     )
 
     try:
         async with _compile_slots:
-            result: CompileResult = await backend.compile(dict(body.files), draft_mode=draft)
+            result: CompileResult = await backend.compile(compile_files, draft_mode=draft)
     except HTTPException:
         raise
     except Exception as exc:

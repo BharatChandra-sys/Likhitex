@@ -121,3 +121,7 @@ apps/api/verify_e2e_server.log
 # Live credentials - never commit
 DEPLOYMENT_CREDENTIALS.md
 .env.docker
+
+# Production env files with real keys - never commit
+prod/
+CREDENTIALS_CONFIGURED.md

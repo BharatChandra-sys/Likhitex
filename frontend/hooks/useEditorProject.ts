@@ -44,6 +44,7 @@ const KEEPALIVE_MAX_BYTES = 64 * 1024;
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
 export interface EditorFile {
+  id: string;
   path: string;
   type: string;
   sizeBytes: number;
@@ -110,6 +111,7 @@ export interface UseEditorProjectResult {
 
 function toEditorFile(file: FileResponse): EditorFile {
   return {
+    id: file.id,
     path: file.path,
     type: file.type,
     sizeBytes: file.size_bytes,
@@ -612,7 +614,9 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
         return null;
       }
 
-      const result = await api.compile({ files: payload, draft: draftMode });
+      // project_id lets the API add the stored images/PDFs, which never live
+      // in the browser's buffers.
+      const result = await api.compile({ files: payload, draft: draftMode, project_id: projectId });
       setCompileResult(result);
       
       // Persist to localStorage so it survives refresh

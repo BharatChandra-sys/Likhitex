@@ -41,7 +41,9 @@ import {
 import CodeEditor, {
   type CursorPosition,
   type HistoryState,
-} from "@/components/editor/CodeEditor";import EditorToolbar from "@/components/editor/EditorToolbar";
+} from "@/components/editor/CodeEditor";
+import BinaryFilePreview from "@/components/editor/BinaryFilePreview";
+import EditorToolbar from "@/components/editor/EditorToolbar";
 import EditorMenuBar from "@/components/editor/EditorMenuBar";
 import FileTree from "@/components/editor/FileTree";
 import SymbolPalette from "@/components/editor/SymbolPalette";
@@ -212,6 +214,10 @@ export default function EditorPage() {
     }),
     [compileResult],
   );
+
+  // Images and PDFs live in object storage and open in a viewer, not the editor.
+  const selectedFile = files.find((f) => f.path === selectedPath) ?? null;
+  const isBinarySelected = selectedFile !== null && !selectedFile.isText;
 
   const outline = useMemo(() => (selectedPath ? parseOutline(content) : []), [selectedPath, content]);
 
@@ -812,8 +818,8 @@ export default function EditorPage() {
         {/* Editor */}
         <div className="flex-1 flex flex-col min-w-0 bg-white">
           <EditorToolbar
-            content={selectedPath ? content : null}
-            canEdit={canEdit && selectedPath !== null}
+            content={selectedPath && !isBinarySelected ? content : null}
+            canEdit={canEdit && selectedPath !== null && !isBinarySelected}
             canUndo={history.canUndo}
             canRedo={history.canRedo}
             onCommand={runCommand}
@@ -841,7 +847,15 @@ export default function EditorPage() {
           />
 
           <div className="flex-1 min-h-0">
-            {selectedPath ? (
+            {selectedFile && isBinarySelected ? (
+              <BinaryFilePreview
+                key={selectedFile.id}
+                projectId={projectId}
+                fileId={selectedFile.id}
+                path={selectedFile.path}
+                sizeBytes={selectedFile.sizeBytes}
+              />
+            ) : selectedPath ? (
               <CodeEditor
                 // The nonce forces a jump even when the line number repeats, which
                 // a plain number prop cannot express.

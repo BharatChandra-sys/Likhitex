@@ -63,6 +63,68 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting %s API v%s", settings.APP_NAME, API_VERSION)
     logger.info("Environment: %s (debug=%s)", settings.APP_ENV, settings.DEBUG)
 
+    # Check database schema health
+    from app.db.base import get_engine
+
+    try:
+        engine = get_engine()
+        async with engine.begin() as conn:
+            # Check if alembic_version table exists
+            result = await conn.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT FROM information_schema.tables "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'alembic_version'"
+                    ")"
+                )
+            )
+            has_migrations = result.scalar()
+
+            if not has_migrations:
+                logger.error(
+                    "Database schema not initialized! "
+                    "Run 'alembic upgrade head' before starting the server."
+                )
+                if settings.is_production:
+                    raise RuntimeError("Database migrations required")
+                logger.warning("Continuing without migrations (development mode)")
+            else:
+                # Get current migration version
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                version = result.scalar()
+                logger.info("Database schema version: %s", version)
+
+                # Check if essential tables exist
+                essential_tables = ['users', 'projects', 'files', 'allowed_emails']
+                result = await conn.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = ANY(:tables)"
+                    ),
+                    {"tables": essential_tables}
+                )
+                existing_tables = {row[0] for row in result.fetchall()}
+                missing_tables = set(essential_tables) - existing_tables
+
+                if missing_tables:
+                    logger.error(
+                        "Missing essential tables: %s. "
+                        "Database schema may be outdated. Run 'alembic upgrade head'",
+                        ", ".join(missing_tables)
+                    )
+                    if settings.is_production:
+                        raise RuntimeError(f"Missing tables: {missing_tables}")
+                    logger.warning("Continuing with incomplete schema (development mode)")
+                else:
+                    logger.info("✓ All essential tables present")
+
+    except Exception as exc:
+        logger.error("Database schema check failed: %s", exc)
+        if settings.is_production:
+            raise
+
     from app.cache.redis import RedisNotAvailableError, close_redis, init_redis
 
     app.state.redis = None

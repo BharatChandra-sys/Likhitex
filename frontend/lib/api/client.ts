@@ -391,7 +391,12 @@ export const api = {
 
   // Compile
   compile: (
-    payload: { files: Record<string, string>; main?: string; draft?: boolean },
+    payload: {
+      files: Record<string, string>;
+      main?: string;
+      draft?: boolean;
+      project_id?: string;
+    },
     options?: RequestOptions,
   ) =>
     request<CompileResponse>("/api/compile/", {

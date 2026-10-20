@@ -318,8 +318,8 @@ def test_compile_draft_mode(authed_client):
     )
 
     response = authed_client.post(
-        "/api/compile/?draft=true",
-        json={"files": {"main.tex": source}},
+        "/api/compile/",
+        json={"files": {"main.tex": source}, "draft": True},
     )
 
     assert response.status_code == 200
@@ -334,8 +334,8 @@ def test_compile_full_mode_still_works(authed_client):
     source = "\\documentclass{article}\\begin{document}Hello\\end{document}"
 
     response = authed_client.post(
-        "/api/compile/?draft=false",
-        json={"files": {"main.tex": source}},
+        "/api/compile/",
+        json={"files": {"main.tex": source}, "draft": False},
     )
 
     assert response.status_code == 200
@@ -394,3 +394,104 @@ def test_direct_compile_env_hides_api_secrets(monkeypatch):
     assert env["openin_any"] == "p"
     assert env["openout_any"] == "p"
     assert env["shell_escape"] == "f"
+
+
+def test_compile_accepts_draft_in_body(authed_client):
+    """The editor sends draft in the JSON body; it must not be rejected as extra."""
+    response = authed_client.post(
+        "/api/compile/",
+        json={"files": {"main.tex": TEX}, "draft": True},
+    )
+
+    assert response.status_code != 422, response.text
+
+
+def test_compile_still_rejects_unknown_fields(authed_client):
+    response = authed_client.post(
+        "/api/compile/",
+        json={"files": {"main.tex": TEX}, "shell_escape": True},
+    )
+
+    assert response.status_code == 422
+
+
+# --- Binary assets from storage ----------------------------------------------
+
+
+class _RecordingBackend:
+    """Captures what the route hands the compiler, without running TeX."""
+
+    def __init__(self):
+        self.files = None
+
+    async def compile(self, files, draft_mode=False):
+        from app.compile.backend import CompileResult
+
+        self.files = files
+        return CompileResult(
+            success=True, pdf=b"%PDF-1.4", log="", synctex=None,
+            errors=[], warnings=[], compile_time=0.1,
+        )
+
+
+def _png_base64() -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), color="blue").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def test_compile_includes_project_images_from_storage(authed_client, monkeypatch):
+    r"""Uploaded images live in object storage; \includegraphics needs them."""
+    import app.compile.routes as compile_routes
+
+    backend = _RecordingBackend()
+    monkeypatch.setattr(compile_routes, "_backend_or_503", lambda: backend)
+
+    project_id = authed_client.post("/api/projects/", json={"name": "Assets"}).json()["id"]
+    upload = authed_client.post(
+        f"/api/projects/{project_id}/files/",
+        json={"path": "figures/plot.png", "content": _png_base64(), "type": "png"},
+    )
+    assert upload.status_code == 201, upload.text
+
+    response = authed_client.post(
+        "/api/compile/",
+        json={"files": {"main.tex": TEX}, "project_id": project_id},
+    )
+
+    assert response.status_code == 200, response.text
+    assert backend.files["main.tex"] == TEX
+    assert isinstance(backend.files["figures/plot.png"], bytes)
+    assert backend.files["figures/plot.png"].startswith(b"\x89PNG")
+
+
+def test_compile_without_project_id_sends_only_request_files(authed_client, monkeypatch):
+    import app.compile.routes as compile_routes
+
+    backend = _RecordingBackend()
+    monkeypatch.setattr(compile_routes, "_backend_or_503", lambda: backend)
+
+    response = authed_client.post("/api/compile/", json={"files": {"main.tex": TEX}})
+
+    assert response.status_code == 200, response.text
+    assert set(backend.files) == {"main.tex"}
+
+
+def test_compile_refuses_projects_the_caller_cannot_see(authed_client, monkeypatch):
+    import uuid
+
+    import app.compile.routes as compile_routes
+
+    monkeypatch.setattr(compile_routes, "_backend_or_503", lambda: _RecordingBackend())
+
+    response = authed_client.post(
+        "/api/compile/",
+        json={"files": {"main.tex": TEX}, "project_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 404

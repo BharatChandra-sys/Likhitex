@@ -1,0 +1,48 @@
+name: Keep Render Service Awake
+
+# Run every 10 minutes during active hours (6 AM - 11 PM UTC)
+# This prevents the free tier from sleeping after 15 minutes of inactivity
+on:
+  schedule:
+    # Every 10 minutes between 06:00 and 23:00 UTC
+    - cron: '*/10 6-23 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    
+    steps:
+      - name: Ping Render Service
+        run: |
+          echo "Pinging Render service to keep it awake..."
+          
+          # Try health endpoint (should always respond)
+          HEALTH_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -m 30 \
+            https://likhitex-api.onrender.com/health || echo "000")
+          
+          echo "Health endpoint status: $HEALTH_RESPONSE"
+          
+          # Also ping readiness to warm up dependencies
+          READY_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -m 30 \
+            https://likhitex-api.onrender.com/health/ready || echo "000")
+          
+          echo "Ready endpoint status: $READY_RESPONSE"
+          
+          # Consider success if either endpoint responds
+          if [ "$HEALTH_RESPONSE" = "200" ] || [ "$READY_RESPONSE" = "200" ] || [ "$READY_RESPONSE" = "503" ]; then
+            echo "✓ Service is responsive"
+            exit 0
+          else
+            echo "⚠ Service did not respond (might be cold starting)"
+            # Don't fail the workflow - cold starts are expected
+            exit 0
+          fi
+      
+      - name: Log Result
+        if: always()
+        run: |
+          echo "Keep-alive ping completed at $(date -u)"
