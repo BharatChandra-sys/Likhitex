@@ -18,8 +18,8 @@ services:
   # ============================================================================
   - type: web
     name: likhitex-api
-    env: docker
-    region: oregon  # Choose closest region: oregon, frankfurt, singapore
+    runtime: docker
+    region: virginia  # Same area as Neon (us-east-2) and B2 (us-east-005)
     plan: free  # Upgrade to starter ($7/mo) for no cold starts
     
     # Docker build configuration
@@ -68,9 +68,6 @@ services:
       
       - key: CLERK_ISSUER
         sync: false  # https://<your-app>.clerk.accounts.dev (no trailing slash)
-      
-      - key: CLERK_AUDIENCE
-        value: ""  # Optional, leave empty unless using custom Clerk setup
       
       - key: INVITE_ONLY
         value: "true"
