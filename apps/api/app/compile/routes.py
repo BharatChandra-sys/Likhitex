@@ -38,18 +38,18 @@ _PATH_RE = re.compile(r"^[\w./@+()-]+$")
 def compute_compilation_fingerprint(files: dict[str, str]) -> str:
     """
     Compute hash of semantically significant content.
-    
+
     Strips LaTeX comments and normalizes whitespace to detect real changes.
     This allows cache hits for whitespace-only or comment-only edits.
-    
+
     Args:
         files: Mapping of file paths to content
-        
+
     Returns:
         SHA256 hash of normalized content
     """
     normalized = {}
-    
+
     for path, content in files.items():
         if path.endswith('.tex'):
             # Strip LaTeX comments (lines starting with %)
@@ -60,7 +60,7 @@ def compute_compilation_fingerprint(files: dict[str, str]) -> str:
         else:
             # Binary files or other formats: use as-is
             normalized[path] = content
-    
+
     # Sort by filename for consistency
     canonical = json.dumps(normalized, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()
@@ -162,7 +162,7 @@ async def compile_latex(
     - Path traversal rejected before the container sees the request
     - Concurrency capped, container has no network and no capabilities
     - A 60s timeout, enforced both in-process and by the container runtime
-    
+
     **Optimization:**
     - Compilation fingerprinting: identical source returns cached PDF (instant)
     """
@@ -175,12 +175,11 @@ async def compile_latex(
         )
 
     backend = _backend_or_503()
-    
+
     # Compute fingerprint for caching
     fingerprint = compute_compilation_fingerprint(body.files)
     cache_key = f"compiled-pdf:{fingerprint}"
-    cached_result = None
-    
+
     # Try to get from Redis cache (gracefully handle unavailable Redis)
     try:
         redis_mgr = get_redis_manager()
@@ -205,7 +204,7 @@ async def compile_latex(
                 )
     except Exception as exc:
         logger.warning("Cache lookup failed: %s", exc)
-    
+
     logger.info(
         "compile request=%s user=%s files=%d draft=%s rate_remaining=%d cache_hit=false",
         request_id,

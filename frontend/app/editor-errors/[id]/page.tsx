@@ -293,6 +293,7 @@ export default function EditorErrorsPage() {
             errorCount={errorCount}
             onCompile={() => void compileNow()}
             onOpenLogs={() => setFilter("all")}
+            synctexBase64={result?.synctex ?? null}
           />
         </div>
       </div>

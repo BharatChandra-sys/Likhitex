@@ -43,7 +43,7 @@ describe("PdfPreview", () => {
 
   it("shows an empty state before the first successful compile", () => {
     render(
-      <PdfPreview pdfBase64={null} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={null} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     expect(screen.getByText("No preview yet")).toBeInTheDocument();
@@ -52,7 +52,7 @@ describe("PdfPreview", () => {
 
   it("reports progress while compiling instead of claiming there is no preview", () => {
     render(
-      <PdfPreview pdfBase64={null} isCompiling error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={null} isCompiling error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     expect(screen.getByText("Compiling your document…")).toBeInTheDocument();
@@ -60,7 +60,7 @@ describe("PdfPreview", () => {
 
   it("renders an iframe from an object URL once a PDF arrives", () => {
     render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     const frame = screen.getByTitle("Compiled PDF preview");
@@ -69,12 +69,12 @@ describe("PdfPreview", () => {
 
   it("revokes the previous object URL when a new PDF replaces it", () => {
     const { rerender } = render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     const second = btoa("%PDF-1.4 second");
     rerender(
-      <PdfPreview pdfBase64={second} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={second} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     expect(revoked).toContain("blob:mock/0");
@@ -82,7 +82,7 @@ describe("PdfPreview", () => {
 
   it("revokes the object URL on unmount", () => {
     const { unmount } = render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     unmount();
@@ -92,12 +92,12 @@ describe("PdfPreview", () => {
 
   it("offers a download link only when there is a PDF", () => {
     const { rerender } = render(
-      <PdfPreview pdfBase64={null} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={null} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
     expect(screen.queryByLabelText("Download PDF")).not.toBeInTheDocument();
 
     rerender(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
     expect(screen.getByLabelText("Download PDF")).toHaveAttribute("href", "blob:mock/0");
   });
@@ -106,7 +106,7 @@ describe("PdfPreview", () => {
     const user = userEvent.setup();
     const onOpenLogs = vi.fn();
     render(
-      <PdfPreview pdfBase64={null} isCompiling={false} error={null} errorCount={2} onCompile={vi.fn()} onOpenLogs={onOpenLogs} />,
+      <PdfPreview pdfBase64={null} isCompiling={false} error={null} errorCount={2} onCompile={vi.fn()} onOpenLogs={onOpenLogs} synctexBase64={null} />,
     );
 
     await user.click(screen.getByLabelText("2 compile errors"));
@@ -125,6 +125,7 @@ describe("PdfPreview", () => {
         errorCount={0}
         onCompile={vi.fn()}
         onOpenLogs={onOpenLogs}
+        synctexBase64={null}
       />,
     );
 
@@ -137,7 +138,7 @@ describe("PdfPreview", () => {
   it("steps zoom through fixed increments", async () => {
     const user = userEvent.setup();
     render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     expect(screen.getByText("100%")).toBeInTheDocument();
@@ -153,7 +154,7 @@ describe("PdfPreview", () => {
   it("will not zoom past the supported range", async () => {
     const user = userEvent.setup();
     render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     for (let i = 0; i < 10; i++) await user.click(screen.getByLabelText("Zoom out"));
@@ -172,7 +173,7 @@ describe("PdfPreview", () => {
   it("keeps a usable URL through StrictMode's double mount", () => {
     render(
       <StrictMode>
-        <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />
+        <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />
       </StrictMode>,
     );
 
@@ -186,21 +187,22 @@ describe("PdfPreview", () => {
   it("recreates the URL after the StrictMode cleanup revoked the first one", () => {
     render(
       <StrictMode>
-        <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />
+        <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />
       </StrictMode>,
     );
 
     // StrictMode creates, revokes, then creates again; the live URL is the last one.
     expect(created.length).toBeGreaterThan(1);
-    const live = screen.getByTitle("Compiled PDF preview").getAttribute("src");
-    expect(created.at(-1)).toBe(live);
+    // The src carries a #page= fragment for page navigation.
+    const live = screen.getByTitle("Compiled PDF preview").getAttribute("src") ?? "";
+    expect(live.split("#")[0]).toBe(created.at(-1));
   });
 
   it("starts a compile when Recompile is pressed", async () => {
     const user = userEvent.setup();
     const onCompile = vi.fn();
     render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={onCompile} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={onCompile} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     await user.click(screen.getByRole("button", { name: /Recompile/ }));
@@ -210,7 +212,7 @@ describe("PdfPreview", () => {
 
   it("disables Recompile while a compile is already running", () => {
     render(
-      <PdfPreview pdfBase64={null} isCompiling error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={null} isCompiling error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     expect(screen.getByRole("button", { name: /Compiling/ })).toBeDisabled();
@@ -223,7 +225,7 @@ describe("PdfPreview", () => {
   it("widens the iframe for zoom instead of scaling it with a transform", async () => {
     const user = userEvent.setup();
     render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     const frame = screen.getByTitle("Compiled PDF preview");
@@ -239,7 +241,7 @@ describe("PdfPreview", () => {
   it("disables the zoom controls at the ends of the range", async () => {
     const user = userEvent.setup();
     render(
-      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} />,
+      <PdfPreview pdfBase64={PDF_BASE64} isCompiling={false} error={null} errorCount={0} onCompile={vi.fn()} onOpenLogs={vi.fn()} synctexBase64={null} />,
     );
 
     for (let i = 0; i < 10; i++) await user.click(screen.getByLabelText("Zoom out"));

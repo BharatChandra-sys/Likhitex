@@ -136,18 +136,18 @@ class LocalCompileBackend(CompileBackend):
         }).encode("utf-8")
 
         logger.info("Starting local compile of %d file(s)", len(files))
-        
+
         # Windows compatibility: use subprocess.Popen with asyncio.to_thread
         # instead of create_subprocess_exec which requires ProactorEventLoop
         try:
             if sys.platform == "win32":
                 # Windows: use subprocess.Popen in a thread
                 import threading
-                result_holder = {"stdout": None, "stderr": None, "error": None}
-                
-                def run_process():
+                result_holder: dict[str, Any] = {"stdout": None, "stderr": None, "error": None}
+
+                def run_process() -> None:
                     try:
-                        proc = subprocess.Popen(
+                        proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                             self._docker_argv(),
                             stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE,
@@ -163,11 +163,11 @@ class LocalCompileBackend(CompileBackend):
                         result_holder["error"] = f"docker_not_found:{exc}"
                     except Exception as exc:
                         result_holder["error"] = f"internal_error:{exc}"
-                
+
                 thread = threading.Thread(target=run_process)
                 thread.start()
                 thread.join(timeout=self.timeout + 5)  # Give extra 5s grace period
-                
+
                 if thread.is_alive():
                     logger.error("Compile thread did not finish")
                     return CompileResult(
@@ -181,7 +181,7 @@ class LocalCompileBackend(CompileBackend):
                         error_type="timeout",
                         error_message=f"Compilation exceeded {self.timeout}s timeout",
                     )
-                
+
                 if result_holder.get("error"):
                     error = result_holder["error"]
                     if error == "timeout":
@@ -203,9 +203,9 @@ class LocalCompileBackend(CompileBackend):
                     else:
                         logger.error("Compile error: %s", error)
                         return self._failure("internal_error", "Compilation transport failure")
-                
-                stdout = result_holder["stdout"]
-                stderr = result_holder["stderr"]
+
+                stdout: bytes = result_holder["stdout"] or b""
+                stderr: bytes = result_holder["stderr"] or b""
             else:
                 # Unix: use asyncio subprocess
                 process: asyncio.subprocess.Process | None = None
@@ -401,49 +401,80 @@ def _maybe_b64(value: Any) -> bytes | None:
         return None
 
 
+def _direct_tex_env(workdir: str) -> dict[str, str]:
+    """
+    Environment for an in-process pdflatex run.
+
+    The direct backend has no container around it, so the document runs next
+    to the API's secrets. Two layers keep them out of the PDF: the child gets
+    a fresh environment instead of inheriting os.environ (so
+    \\input{/proc/self/environ} has nothing to leak), and kpathsea runs in
+    paranoid mode, which refuses absolute paths, `..` and dotfiles for both
+    reads and writes. Shell escape is forced off here as well as on argv.
+    """
+    import os
+
+    # MiKTeX on Windows dev machines cannot start without these; none of them
+    # hold secrets.
+    passthrough = ("SYSTEMROOT", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP")
+    return {
+        **{name: os.environ[name] for name in passthrough if name in os.environ},
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": workdir,
+        "LANG": "C.UTF-8",
+        "TEXMFHOME": workdir,
+        "TEXMFVAR": f"{workdir}/.texmf-var",
+        "TEXMFCONFIG": f"{workdir}/.texmf-config",
+        "TEXMFOUTPUT": workdir,
+        "openin_any": "p",
+        "openout_any": "p",
+        "shell_escape": "f",
+    }
+
+
 class DirectCompileBackend(CompileBackend):
     """
     Direct subprocess compilation (no Docker).
-    
+
     Simpler approach for local development. Runs pdflatex directly in a temp directory.
     Security is reduced but sufficient for trusted local development.
     """
-    
+
     def __init__(self, timeout: int | None = None) -> None:
         self.timeout = timeout or settings.COMPILE_TIMEOUT_SECONDS
-    
+
     async def compile(self, files: FileMap, draft_mode: bool = False) -> CompileResult:
         """Compile directly using subprocess."""
+        import shutil
         import tempfile
         import time
-        import shutil
         from pathlib import Path
-        
+
         start_time = time.time()
-        
+
         # Create temp directory
         tmpdir = tempfile.mkdtemp(prefix="likhitex_")
         tmppath = Path(tmpdir)
-        
+
         try:
             # Write all files to temp directory
             for filepath, content in files.items():
                 filepath = filepath.lstrip("/\\")  # Remove leading slashes
                 full_path = tmppath / filepath
                 full_path.parent.mkdir(parents=True, exist_ok=True)
-                
+
                 if isinstance(content, bytes):
                     full_path.write_bytes(content)
                 else:
                     full_path.write_text(content, encoding="utf-8")
-            
+
             # Find main .tex file
             main_tex = None
             for filepath in files.keys():
                 if filepath.endswith(".tex"):
                     main_tex = filepath.lstrip("/\\")
                     break
-            
+
             if not main_tex:
                 return CompileResult(
                     success=False,
@@ -456,66 +487,70 @@ class DirectCompileBackend(CompileBackend):
                     error_type="no_tex_file",
                     error_message="No .tex file found in project",
                 )
-            
+
             # Run pdflatex
             # Note: Run twice for proper references/cross-refs
             cmd = [
                 "pdflatex",
+                "-no-shell-escape",
                 "-interaction=nonstopmode",
                 "-file-line-error",
                 "-synctex=1",  # Generate SyncTeX data for PDF<->source navigation
                 "-output-directory=.",
                 main_tex,
             ]
-            
+            tex_env = _direct_tex_env(tmpdir)
+
             logger.info(f"Running pdflatex on {main_tex} in {tmpdir}")
-            
+
             # Run in thread to avoid blocking
-            def run_compile():
+            def run_compile() -> tuple[bytes | None, bytes, int | None]:
                 try:
                     # First pass
-                    proc = subprocess.Popen(
+                    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                         cmd,
                         cwd=tmpdir,
+                        env=tex_env,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         stdin=subprocess.PIPE,  # Provide stdin to prevent hanging
                     )
                     stdout1, stderr1 = proc.communicate(input=b"", timeout=self.timeout)
-                    
+
                     # Wait a moment for file handles to be released
                     time.sleep(0.1)
-                    
+
                     # If first pass succeeded, run second pass
                     if proc.returncode == 0:
-                        proc2 = subprocess.Popen(
+                        proc2 = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                             cmd,
                             cwd=tmpdir,
+                            env=tex_env,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
                             stdin=subprocess.PIPE,
                         )
                         stdout2, stderr2 = proc2.communicate(input=b"", timeout=self.timeout)
-                        
+
                         # Wait for file handles to be released
                         time.sleep(0.1)
-                        
+
                         return stdout2, stderr2, proc2.returncode
-                    
+
                     return stdout1, stderr1, proc.returncode
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     return None, b"Compilation timed out", -1
                 except FileNotFoundError:
                     return None, b"pdflatex not found", -2
-            
+
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(run_compile)
                 stdout, stderr, returncode = future.result(timeout=self.timeout + 5)
-            
+
             compile_time = time.time() - start_time
-            
+
             if returncode == -2:
                 return CompileResult(
                     success=False,
@@ -528,7 +563,7 @@ class DirectCompileBackend(CompileBackend):
                     error_type="pdflatex_not_found",
                     error_message="pdflatex not found. Please install TeX Live or MiKTeX.",
                 )
-            
+
             if returncode == -1:
                 return CompileResult(
                     success=False,
@@ -541,45 +576,45 @@ class DirectCompileBackend(CompileBackend):
                     error_type="timeout",
                     error_message=f"Compilation exceeded {self.timeout}s timeout",
                 )
-            
+
             # Read output files
             pdf_file = tmppath / main_tex.replace(".tex", ".pdf")
             log_file = tmppath / main_tex.replace(".tex", ".log")
             synctex_file = tmppath / main_tex.replace(".tex", ".synctex.gz")
-            
+
             pdf_data = None
             if pdf_file.exists():
                 pdf_data = pdf_file.read_bytes()
-            
+
             # Read SyncTeX file if present (for future PDF<->source sync)
             synctex_data = None
             if synctex_file.exists():
                 synctex_data = synctex_file.read_bytes()
-            
+
             log_data = ""
             if log_file.exists():
                 log_data = log_file.read_text(encoding="utf-8", errors="replace")
             elif stdout:
                 log_data = stdout.decode("utf-8", errors="replace")
-            
+
             # Add stderr to log if present
             if stderr:
                 stderr_text = stderr.decode("utf-8", errors="replace")
                 if stderr_text.strip():
                     log_data = f"{log_data}\n\n=== STDERR ===\n{stderr_text}"
-            
+
             # Check for "No pages of output" which means empty document
             no_pages = "No pages of output" in log_data
-            
+
             success = returncode == 0 and (pdf_data is not None or no_pages)
-            
+
             # Log the error for debugging
             if not success:
                 logger.error(f"Compilation failed: returncode={returncode}, pdf_exists={pdf_file.exists()}")
                 if log_data:
                     # Show last 1000 chars which usually has the error
                     logger.error(f"Log tail: {log_data[-1000:]}")
-            
+
             # For empty documents, create a message
             if no_pages and not pdf_data:
                 return CompileResult(
@@ -593,7 +628,7 @@ class DirectCompileBackend(CompileBackend):
                     error_type="empty_document",
                     error_message="Document compiled successfully but has no content to display",
                 )
-            
+
             return CompileResult(
                 success=success,
                 pdf=pdf_data,
@@ -605,7 +640,7 @@ class DirectCompileBackend(CompileBackend):
                 error_type=None if success else "compile_error",
                 error_message=None if success else "LaTeX compilation failed",
             )
-            
+
         except Exception as exc:
             logger.error(f"Compile error: {exc}", exc_info=True)
             return CompileResult(
@@ -623,7 +658,7 @@ class DirectCompileBackend(CompileBackend):
             # Clean up temp directory with retry for Windows file locking
             # Wait a bit for file handles to be fully released
             time.sleep(0.2)
-            
+
             for attempt in range(3):
                 try:
                     shutil.rmtree(tmpdir, ignore_errors=False)
@@ -649,7 +684,7 @@ def get_compile_backend(backend_type: str | None = None) -> CompileBackend:
 
     if name == "local":
         return LocalCompileBackend()
-    
+
     if name == "direct":
         return DirectCompileBackend()
 

@@ -1,7 +1,7 @@
 """
 Storage backend interface.
 
-Abstraction over object storage (Cloudflare R2 / S3) with a local filesystem
+Abstraction over object storage (Backblaze B2 / Cloudflare R2 / any S3) with a local filesystem
 fallback for development.
 
 Key handling: storage keys are derived from server-side data (project UUID +
@@ -11,6 +11,7 @@ anyway, because a traversal here would escape the storage root.
 import hashlib
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -101,30 +102,47 @@ class StorageBackend(ABC):
         return key
 
 
-class R2Storage(StorageBackend):
-    """Cloudflare R2 (S3-compatible) storage backend."""
+class S3Storage(StorageBackend):
+    """
+    Generic S3-compatible storage backend.
+
+    Works with Backblaze B2, AWS S3, MinIO, and anything else that speaks the
+    S3 API at a configurable endpoint.
+    """
 
     def __init__(
         self,
-        account_id: str,
+        endpoint_url: str,
         access_key_id: str,
         secret_access_key: str,
         bucket_name: str,
+        region: str = "",
     ) -> None:
-        if not account_id or not access_key_id or not secret_access_key:
-            raise StorageError("R2 credentials are incomplete")
-        self.account_id = account_id
+        if not endpoint_url or not access_key_id or not secret_access_key or not bucket_name:
+            raise StorageError("S3 credentials are incomplete")
+        self.endpoint = endpoint_url.rstrip("/")
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.bucket_name = bucket_name
-        self.endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+        self.region = region or self.region_from_endpoint(self.endpoint)
+
+    @staticmethod
+    def region_from_endpoint(endpoint: str) -> str:
+        """
+        Derive the signing region from an endpoint like
+        https://s3.us-west-004.backblazeb2.com. Presigned URLs only validate when
+        signed for the bucket's real region, so guessing would break them.
+        """
+        match = re.match(r"^https?://s3\.([a-z0-9-]+)\.", endpoint)
+        return match.group(1) if match else "us-east-1"
 
     def _client(self) -> Any:
-        """Create an aioboto3 S3 client factory scoped to this account."""
+        """Create an aioboto3 S3 client scoped to this endpoint."""
         try:
             import aioboto3
+            from botocore.config import Config
         except ImportError as exc:  # pragma: no cover - dependency is declared
-            raise StorageError("aioboto3 is required for R2 storage") from exc
+            raise StorageError("aioboto3 is required for S3 storage") from exc
 
         session = aioboto3.Session()
         return session.client(
@@ -132,7 +150,15 @@ class R2Storage(StorageBackend):
             endpoint_url=self.endpoint,
             aws_access_key_id=self.access_key_id,
             aws_secret_access_key=self.secret_access_key,
-            region_name="auto",
+            region_name=self.region,
+            config=Config(
+                signature_version="s3v4",
+                # botocore >= 1.36 sends CRC checksums on every request by
+                # default, which several S3-compatible services reject.
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
         )
 
     async def put(
@@ -141,7 +167,7 @@ class R2Storage(StorageBackend):
         data: bytes,
         content_type: str = "application/octet-stream",
     ) -> str:
-        """Upload an object to R2."""
+        """Upload an object."""
         safe = self.safe_key(key)
         try:
             async with self._client() as s3:
@@ -150,18 +176,18 @@ class R2Storage(StorageBackend):
                     Key=safe,
                     Body=data,
                     ContentType=content_type,
-                    # Server-side encryption at rest.
+                    # Server-side encryption at rest (SSE-B2 on Backblaze).
                     ServerSideEncryption="AES256",
                 )
         except Exception as exc:
-            logger.error("R2 put(%s) failed: %s", safe, exc)
+            logger.error("S3 put(%s) failed: %s", safe, exc)
             raise StorageError("Failed to store object") from exc
 
-        logger.info("Stored %s in R2 (%d bytes)", safe, len(data))
+        logger.info("Stored %s in object storage (%d bytes)", safe, len(data))
         return safe
 
     async def get(self, key: str) -> bytes:
-        """Download an object from R2."""
+        """Download an object."""
         safe = self.safe_key(key)
         try:
             async with self._client() as s3:
@@ -169,12 +195,12 @@ class R2Storage(StorageBackend):
                 body = response["Body"]
                 data: bytes = await body.read()
         except Exception as exc:
-            logger.error("R2 get(%s) failed: %s", safe, exc)
+            logger.error("S3 get(%s) failed: %s", safe, exc)
             raise StorageError("Failed to read object") from exc
         return data
 
     async def delete(self, key: str) -> None:
-        """Delete an object from R2."""
+        """Delete an object. Deleting a missing key is not an error."""
         safe = self.safe_key(key)
         try:
             async with self._client() as s3:
@@ -182,9 +208,9 @@ class R2Storage(StorageBackend):
         except Exception as exc:
             # A failed cleanup must not fail the user's request; the object is
             # content-addressed so it is unreachable but harmless.
-            logger.warning("R2 delete(%s) failed: %s", safe, exc)
+            logger.warning("S3 delete(%s) failed: %s", safe, exc)
             return
-        logger.info("Deleted %s from R2", safe)
+        logger.info("Deleted %s from object storage", safe)
 
     async def get_presigned_url(self, key: str, expires: int = 3600) -> str:
         """Generate a presigned GET URL."""
@@ -197,9 +223,31 @@ class R2Storage(StorageBackend):
                     ExpiresIn=max(1, min(expires, 604_800)),
                 )
         except Exception as exc:
-            logger.error("R2 presign(%s) failed: %s", safe, exc)
+            logger.error("S3 presign(%s) failed: %s", safe, exc)
             raise StorageError("Failed to generate download URL") from exc
         return url
+
+
+class R2Storage(S3Storage):
+    """Cloudflare R2 storage: S3 with an account-derived endpoint."""
+
+    def __init__(
+        self,
+        account_id: str,
+        access_key_id: str,
+        secret_access_key: str,
+        bucket_name: str,
+    ) -> None:
+        if not account_id or not access_key_id or not secret_access_key:
+            raise StorageError("R2 credentials are incomplete")
+        self.account_id = account_id
+        super().__init__(
+            endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            bucket_name=bucket_name,
+            region="auto",
+        )
 
 
 class LocalStorage(StorageBackend):
@@ -289,16 +337,34 @@ def get_storage() -> StorageBackend:
     """
     global _storage_backend
     if _storage_backend is None:
-        if settings.R2_REQUIRED_OK:
+        if settings.STORAGE_BACKEND == "s3":
+            if not settings.S3_REQUIRED_OK:
+                raise StorageError("S3 storage selected but credentials missing")
+            _storage_backend = S3Storage(
+                endpoint_url=settings.S3_ENDPOINT_URL,
+                access_key_id=settings.S3_ACCESS_KEY_ID,
+                secret_access_key=settings.S3_SECRET_ACCESS_KEY,
+                bucket_name=settings.S3_BUCKET_NAME,
+                region=settings.S3_REGION,
+            )
+            logger.info(
+                "Using S3 storage backend (endpoint: %s, bucket: %s)",
+                settings.S3_ENDPOINT_URL,
+                settings.S3_BUCKET_NAME,
+            )
+        elif settings.STORAGE_BACKEND == "r2":
+            if not settings.R2_REQUIRED_OK:
+                raise StorageError("R2 storage selected but credentials missing")
             _storage_backend = R2Storage(
                 account_id=settings.R2_ACCOUNT_ID,
                 access_key_id=settings.R2_ACCESS_KEY_ID,
                 secret_access_key=settings.R2_SECRET_ACCESS_KEY,
                 bucket_name=settings.R2_BUCKET_NAME,
             )
+            logger.info("Using R2 storage backend (bucket: %s)", settings.R2_BUCKET_NAME)
         else:
-            logger.warning("R2 not configured; using local storage (DEVELOPMENT ONLY)")
             _storage_backend = LocalStorage()
+            logger.info("Using local filesystem storage (path: %s)", settings.LOCAL_STORAGE_PATH)
     return _storage_backend
 
 

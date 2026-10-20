@@ -84,13 +84,16 @@ export interface UseEditorProjectResult {
   selectFile: (path: string) => void;
   setContent: (value: string) => void;
   saveNow: () => Promise<void>;
-  createFile: (path: string, initialContent?: string) => Promise<boolean>;
+  createFile: (path: string, initialContent?: string, fileType?: string) => Promise<boolean>;
   renameFile: (fromPath: string, toPath: string) => Promise<boolean>;
   deleteFile: (path: string) => Promise<boolean>;
 
   isCompiling: boolean;
   compileResult: CompileResponse | null;
   compileError: string | null;
+  /** When true, the next compile skips images for speed. */
+  draftMode: boolean;
+  setDraftMode: (draft: boolean) => void;
   /**
    * Runs a compile, recording the result.
    *
@@ -140,6 +143,7 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   const [isCompiling, setIsCompiling] = useState(false);
   const [compileResult, setCompileResult] = useState<CompileResponse | null>(null);
   const [compileError, setCompileError] = useState<string | null>(null);
+  const [draftMode, setDraftMode] = useState(false);
 
   // Load last compile result from localStorage on mount
   useEffect(() => {
@@ -477,18 +481,28 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   }, [loadFileList]);
 
   const createFile = useCallback(
-    async (path: string, initialContent = "") => {
+    async (path: string, initialContent = "", fileType?: string) => {
       try {
-        // Check for duplicate file name
         const normalizedPath = path.trim();
         const existingFile = latest.current.files.find((f: EditorFile) => f.path === normalizedPath);
         if (existingFile) {
           setSaveError(`A file named "${normalizedPath}" already exists`);
           return false;
         }
-        
-        await api.uploadFile(projectId, { path: normalizedPath, content: initialContent });
-        setContents((current) => ({ ...current, [normalizedPath]: initialContent }));
+
+        const payload: { path: string; content: string; type?: string } = {
+          path: normalizedPath,
+          content: initialContent,
+        };
+        if (fileType) payload.type = fileType;
+
+        await api.uploadFile(projectId, payload);
+
+        // Only keep text files in the editor state. Binary files (images, PDFs)
+        // are stored in R2 and fetched via download URL when needed.
+        if (!fileType || [".tex", ".bib", ".sty", ".cls", ".bst", ".txt", ".md", ".cfg", ".def", ".ltx"].includes(`.${fileType}`)) {
+          setContents((current) => ({ ...current, [normalizedPath]: initialContent }));
+        }
         await refreshFiles();
         setSelectedPath(normalizedPath);
         return true;
@@ -598,7 +612,7 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
         return null;
       }
 
-      const result = await api.compile({ files: payload });
+      const result = await api.compile({ files: payload, draft: draftMode });
       setCompileResult(result);
       
       // Persist to localStorage so it survives refresh
@@ -646,6 +660,8 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
     isCompiling,
     compileResult,
     compileError,
+    draftMode,
+    setDraftMode,
     // Wrapped so the public signature stays `Promise<void>`; `compileAndReport`
     // exposes the response for callers that need the outcome.
     compileNow: async () => {

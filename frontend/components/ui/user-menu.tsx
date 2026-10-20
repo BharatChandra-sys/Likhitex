@@ -36,10 +36,20 @@ export function UserMenu() {
 
   if (!user) return null;
 
-  const userInitial = user.firstName?.[0] || user.emailAddresses[0]?.emailAddress[0].toUpperCase() || "U";
-  const userName = user.firstName && user.lastName 
+  // Extract name from email if firstName is not available
+  const emailUsername = user.emailAddresses[0]?.emailAddress.split('@')[0] || "";
+  const displayName = user.firstName && user.lastName 
     ? `${user.firstName} ${user.lastName}`
-    : user.firstName || "User";
+    : user.firstName 
+    ? user.firstName
+    : emailUsername || user.username || "User";
+  
+  const userInitial = user.firstName?.[0] 
+    || emailUsername[0]?.toUpperCase() 
+    || user.username?.[0]?.toUpperCase()
+    || user.emailAddresses[0]?.emailAddress[0].toUpperCase() 
+    || "U";
+  
   const userEmail = user.emailAddresses[0]?.emailAddress || "";
 
   return (
@@ -66,7 +76,7 @@ export function UserMenu() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm text-on-surface truncate">
-                  {userName}
+                  {displayName}
                 </p>
                 <p className="text-xs text-on-surface-variant truncate">
                   {userEmail}

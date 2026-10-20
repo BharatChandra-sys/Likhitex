@@ -17,6 +17,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Receive, Scope, Send
 
 from app.config import settings
 from app.middleware.request_id import RequestIDMiddleware
@@ -33,6 +34,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 API_VERSION = "0.1.0"
+
+# Probes come from the platform (Render, Docker HEALTHCHECK) with an internal
+# or localhost Host header, so they bypass host validation. They return no
+# host-derived content, which is what host validation protects.
+PROBE_PATHS = frozenset({"/health", "/health/ready"})
+
+
+class ProbeAwareTrustedHostMiddleware(TrustedHostMiddleware):
+    """TrustedHostMiddleware that lets liveness/readiness probes through."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"] in PROBE_PATHS:
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
 
 
 @asynccontextmanager
@@ -118,7 +134,7 @@ app.add_middleware(
 
 allowed_hosts = settings.allowed_hosts_list
 if allowed_hosts:
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+    app.add_middleware(ProbeAwareTrustedHostMiddleware, allowed_hosts=allowed_hosts)
 else:
     logger.warning("ALLOWED_HOSTS is empty; Host header validation is disabled")
 

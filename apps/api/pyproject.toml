@@ -24,6 +24,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "aiosmtplib>=3.0.1",
     "python-dotenv>=1.0.0",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -94,7 +95,7 @@ disallow_untyped_defs = false
 # Third-party packages that ship no type information. Listed explicitly so a
 # genuinely missing dependency is still an error.
 [[tool.mypy.overrides]]
-module = ["aioboto3.*", "aiosmtplib.*", "yarl.*"]
+module = ["aioboto3.*", "botocore.*", "aiosmtplib.*", "yarl.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

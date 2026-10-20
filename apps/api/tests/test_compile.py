@@ -6,13 +6,27 @@ cover request validation and the auth boundary directly, and only exercise the
 full container path when the image is present.
 """
 
+import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
-from app.compile.backend import get_compile_backend
-from app.compile.routes import CompileRequest
+# The compiler runner lives outside the API package; load it directly so the
+# unit tests can exercise _inject_draft_mode without Docker.
+_COMPILER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "compiler"))
+if _COMPILER_DIR not in sys.path:
+    sys.path.insert(0, _COMPILER_DIR)
+
+import importlib.util  # noqa: E402
+
+_runner_spec = importlib.util.spec_from_file_location("compile_runner", os.path.join(_COMPILER_DIR, "runner.py"))
+compile_runner = importlib.util.module_from_spec(_runner_spec)
+_runner_spec.loader.exec_module(compile_runner)
+
+from app.compile.backend import get_compile_backend  # noqa: E402
+from app.compile.routes import CompileRequest  # noqa: E402
 
 TEX = "\\documentclass{article}\n\\begin{document}\nHello, World!\n\\end{document}"
 
@@ -264,3 +278,119 @@ def test_compile_large_document(authed_client):
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+
+
+# --- Draft mode --------------------------------------------------------------
+
+
+def test_inject_draft_mode_adds_demo_package():
+    """Injects \\usepackage[demo]{graphicx} when graphicx is used without demo."""
+    source = "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}text\\end{document}"
+    result = compile_runner._inject_draft_mode(source)
+    assert "[demo]" in result
+    assert "\\usepackage[demo]{graphicx}" in result
+
+
+def test_inject_draft_mode_replaces_existing_graphicx():
+    """Adds [demo] to an existing graphicx load."""
+    source = "\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}text\\end{document}"
+    result = compile_runner._inject_draft_mode(source)
+    assert "\\usepackage[demo]{graphicx}" in result
+    assert "\\usepackage{graphicx}" not in result
+
+
+def test_inject_draft_mode_idempotent():
+    """Does not double-inject if already in demo mode."""
+    source = "\\documentclass{article}\n\\usepackage[demo]{graphicx}\n\\begin{document}text\\end{document}"
+    result = compile_runner._inject_draft_mode(source)
+    assert result.count("[demo]") == 1
+
+
+@requires_image
+def test_compile_draft_mode(authed_client):
+    """Draft mode injects demo graphicx and returns a PDF."""
+    source = (
+        "\\documentclass{article}\n"
+        "\\usepackage{graphicx}\n"
+        "\\begin{document}\n"
+        "\\includegraphics[width=0.5\\textwidth]{figures/diagram}\n"
+        "\\end{document}"
+    )
+
+    response = authed_client.post(
+        "/api/compile/?draft=true",
+        json={"files": {"main.tex": source}},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["pdf"] is not None
+
+
+@requires_image
+def test_compile_full_mode_still_works(authed_client):
+    """Without draft, compilation still produces a PDF."""
+    source = "\\documentclass{article}\\begin{document}Hello\\end{document}"
+
+    response = authed_client.post(
+        "/api/compile/?draft=false",
+        json={"files": {"main.tex": source}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
+# --- Image optimization (backend) --------------------------------------------
+
+
+def test_upload_image_triggers_optimization(authed_client, project):
+    """Image upload stores an optimized version; size should shrink."""
+    import io
+
+    from PIL import Image
+
+    big = Image.new("RGB", (3000, 3000), color="red")
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    raw = buf.getvalue()
+    original_size = len(raw)
+
+    import base64
+
+    # The project fixture only creates the object; the files route needs a
+    # project that the database knows about, so we create one through the API.
+    created = authed_client.post("/api/projects/", json={"name": "Image Opt"}).json()
+    project_id = created["id"]
+
+    response = authed_client.post(
+        f"/api/projects/{project_id}/files/",
+        json={
+            "path": "diagram.png",
+            "content": base64.b64encode(raw).decode(),
+            "type": "png",
+        },
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    # The backend resizes to 1200px max dimension and re-encodes, so the
+    # stored size must be strictly smaller than the original 27 MB raw image.
+    assert data["size_bytes"] < original_size
+
+
+def test_direct_compile_env_hides_api_secrets(monkeypatch):
+    """pdflatex in the API container must not inherit DB/storage/auth secrets."""
+    from app.compile.backend import _direct_tex_env
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:secret@h/db")
+    monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "b2-secret")
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_live_secret")
+
+    env = _direct_tex_env("/tmp/job")  # noqa: S108
+
+    assert "secret" not in " ".join(env.values())
+    assert env["openin_any"] == "p"
+    assert env["openout_any"] == "p"
+    assert env["shell_escape"] == "f"

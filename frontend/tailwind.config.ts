@@ -65,6 +65,16 @@ const config: Config = {
       leading: {
         "14px": "14px",
       },
+      keyframes: {
+        indeterminate: {
+          "0%": { transform: "translateX(-100%)" },
+          "50%": { transform: "translateX(30%)" },
+          "100%": { transform: "translateX(200%)" },
+        },
+      },
+      animation: {
+        indeterminate: "indeterminate 1.6s infinite cubic-bezier(0.65, 0.815, 0.735, 0.395)",
+      },
     },
   },
   plugins: [],

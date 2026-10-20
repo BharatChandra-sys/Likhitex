@@ -245,7 +245,7 @@ def test_security_headers_present(client: TestClient):
 
 def test_untrusted_host_is_rejected(client: TestClient):
     """A request with an unexpected Host header is refused."""
-    response = client.get("/health", headers={"Host": "evil.example.com"})
+    response = client.get("/api/users/me", headers={"Host": "evil.example.com"})
 
     assert response.status_code == 400
 
@@ -342,3 +342,31 @@ def test_ticket_verification_fails_closed_on_redis_error():
 
     with pytest.raises(RuntimeError):
         asyncio.run(tickets.verify_ticket(BrokenRedis(), "abc123"))
+
+
+def test_probes_bypass_host_validation_but_api_routes_do_not():
+    """Render/Docker probes send internal Host headers; real routes stay guarded."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.main import ProbeAwareTrustedHostMiddleware
+
+    probe_app = FastAPI()
+    probe_app.add_middleware(
+        ProbeAwareTrustedHostMiddleware, allowed_hosts=["likhitex-api.onrender.com"]
+    )
+
+    @probe_app.get("/health")
+    async def health():
+        return {"ok": True}
+
+    @probe_app.get("/api/thing")
+    async def thing():
+        return {"ok": True}
+
+    client = TestClient(probe_app, base_url="http://10.0.0.5:10000")
+    assert client.get("/health").status_code == 200
+    assert client.get("/api/thing").status_code == 400
+
+    trusted = TestClient(probe_app, base_url="https://likhitex-api.onrender.com")
+    assert trusted.get("/api/thing").status_code == 200

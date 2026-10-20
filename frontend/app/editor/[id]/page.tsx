@@ -48,7 +48,9 @@ import SymbolPalette from "@/components/editor/SymbolPalette";
 import PdfPreview from "@/components/editor/PdfPreview";
 import CompileLogsDrawer from "@/components/editor/CompileLogsDrawer";
 import CompileStatusBanner from "@/components/editor/CompileStatusBanner";
-import EditorLoadingSkeleton from "@/components/states/EditorLoadingSkeleton";
+import { EditorLoadingSkeleton } from "@/components/editor/EditorLoadingSkeleton";
+import { ConnectionBanner } from "@/components/editor/ConnectionBanner";
+import { ServerWaking } from "@/components/editor/ServerWaking";
 import ConfirmDialog from "@/components/dashboard/ConfirmDialog";
 import { ShareProjectModal } from "@/components/modals/ShareProjectModal";
 import { parseOutline } from "@/lib/fileTree";
@@ -144,18 +146,38 @@ export default function EditorPage() {
     async (fileList: FileList | null) => {
       if (!fileList) return;
       for (const file of Array.from(fileList)) {
-        const reader = new FileReader();
-        await new Promise<void>((resolve) => {
-          reader.onload = async () => {
-            const content =
-              typeof reader.result === "string"
-                ? reader.result
-                : "";
-            await createFile(file.name, content);
-            resolve();
-          };
-          reader.readAsText(file);
-        });
+        const extension = file.name.includes(".")
+          ? file.name.substring(file.name.lastIndexOf(".")).toLowerCase()
+          : "";
+        const isTextFile = [".tex", ".bib", ".sty", ".cls", ".bst", ".txt", ".md", ".cfg", ".def", ".ltx"].includes(extension);
+
+        if (isTextFile) {
+          const reader = new FileReader();
+          await new Promise<void>((resolve) => {
+            reader.onload = async () => {
+              const content = typeof reader.result === "string" ? reader.result : "";
+              await createFile(file.name, content);
+              resolve();
+            };
+            reader.readAsText(file);
+          });
+        } else {
+          const reader = new FileReader();
+          await new Promise<void>((resolve) => {
+            reader.onload = async () => {
+              if (reader.result instanceof ArrayBuffer) {
+                const bytes = new Uint8Array(reader.result);
+                // Convert to base64 for the API. TextEncoder+base64 is faster
+                // than the btoa(String.fromCharCode) path for files >100 KB.
+                const binary = String.fromCharCode(...bytes);
+                const base64 = btoa(binary);
+                await createFile(file.name, base64, extension.replace(".", ""));
+              }
+              resolve();
+            };
+            reader.readAsArrayBuffer(file);
+          });
+        }
       }
     },
     [createFile],
@@ -795,6 +817,8 @@ export default function EditorPage() {
             canUndo={history.canUndo}
             canRedo={history.canRedo}
             onCommand={runCommand}
+            draftMode={editor.draftMode}
+            onDraftModeChange={editor.setDraftMode}
             leading={
               <>
                 <span className="h-7 px-2 rounded text-xs font-medium bg-primary-fixed text-primary flex items-center gap-1.5 min-w-0">

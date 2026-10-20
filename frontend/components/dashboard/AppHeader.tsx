@@ -67,10 +67,24 @@ export default function AppHeader({
   const clerkFullName = clerkUser?.fullName || 
     [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ");
   const clerkEmail = clerkUser?.primaryEmailAddress?.emailAddress;
+  
+  // Extract username from email (part before @)
+  const emailUsername = clerkEmail?.split("@")[0] || user?.email?.split("@")[0];
 
-  const name = (user?.full_name && user.full_name.trim())
-    ? user.full_name
-    : (clerkFullName || user?.email?.split("@")[0] || "User");
+  // Build display name with proper fallbacks
+  let displayName = "User";
+  if (user?.full_name && user.full_name.trim() && !user.full_name.startsWith("user_")) {
+    // Use API full_name if it exists and isn't a Clerk ID
+    displayName = user.full_name;
+  } else if (clerkFullName && clerkFullName.trim()) {
+    // Use Clerk's full name
+    displayName = clerkFullName;
+  } else if (emailUsername) {
+    // Use email username as fallback
+    displayName = emailUsername;
+  }
+  
+  const name = displayName;
   const initials = name
     .split(" ")
     .map((part) => part[0])

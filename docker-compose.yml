@@ -1,62 +1,232 @@
+# Docker Compose for Local Development
+# Start all services: docker-compose up
+# Stop: docker-compose down
+# Reset: docker-compose down -v
+
 version: '3.9'
 
-# Local development environment
-# Runs: Postgres + Mailpit + (optionally) Redis
-# API and frontend run natively for faster hot-reload
-
 services:
-  # PostgreSQL database
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
   postgres:
     image: postgres:16-alpine
     container_name: likhitex-postgres
-    restart: unless-stopped
-    env_file:
-      - .env.docker
     environment:
-      POSTGRES_INITDB_ARGS: "--auth-host=trust"
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_USER: likhitex
+      POSTGRES_PASSWORD: likhitex_dev_password
+      POSTGRES_DB: likhitex_dev
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-likhitex}"]
+      test: ["CMD-SHELL", "pg_isready -U likhitex"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - likhitex
 
-  # Mailpit (SMTP testing, local only)
+  # ==========================================================================
+  # Redis Cache
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: likhitex-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - likhitex
+
+  # ==========================================================================
+  # LaTeX Compiler
+  # ==========================================================================
+  compiler:
+    build:
+      # The Dockerfile COPYs texmf.cnf and runner.py relative to its own folder.
+      context: ./apps/compiler
+      dockerfile: Dockerfile
+    container_name: likhitex-compiler
+    # Not exposed to host - accessed via API service
+    networks:
+      - likhitex
+    # Resource limits matching production
+    mem_limit: 512m
+    cpus: 0.5
+    # Security settings matching production
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /compile:exec,mode=1777
+      - /tmp:exec,mode=1777
+
+  # ==========================================================================
+  # FastAPI Backend
+  # ==========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: likhitex-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      compiler:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      # App
+      APP_ENV: development
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+      
+      # Database
+      DATABASE_URL: postgresql://likhitex:likhitex_dev_password@postgres:5432/likhitex_dev
+      DB_POOL_SIZE: "5"
+      DB_MAX_OVERFLOW: "2"
+      
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      REDIS_REQUIRED: "false"
+      
+      # Security (development only)
+      SECRET_KEY: dev-secret-key-minimum-32-characters-long
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-sk_test_placeholder}
+      CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-pk_test_placeholder}
+      CLERK_JWKS_URL: ${CLERK_JWKS_URL:-https://clerk.example.com/.well-known/jwks.json}
+      CLERK_ISSUER: ${CLERK_ISSUER:-https://clerk.example.com}
+      
+      # Storage (local development)
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_PATH: /app/var/storage
+      
+      # CORS
+      CORS_ORIGINS: http://localhost:3000,http://localhost:3001
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      
+      # Compilation
+      COMPILE_BACKEND: direct
+      COMPILE_TIMEOUT_SECONDS: "60"
+      COMPILE_MAX_CONCURRENT: "2"
+      
+      # Mail
+      MAIL_BACKEND: console
+      
+      # Rate limiting (disabled for dev)
+      RATE_LIMIT_ENABLED: "false"
+      
+      # WebSocket
+      COLLAB_WS_URL: ws://localhost:8000/collab
+      WS_TICKET_TTL: "30"
+    volumes:
+      - ./apps/api/app:/app/app:ro  # Mount source for hot reload
+      - api_storage:/app/var/storage
+    networks:
+      - likhitex
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ==========================================================================
+  # Mailpit (Email Testing)
+  # ==========================================================================
   mailpit:
     image: axllent/mailpit:latest
     container_name: likhitex-mailpit
-    restart: unless-stopped
     ports:
       - "1025:1025"  # SMTP
       - "8025:8025"  # Web UI
-    environment:
-      MP_MAX_MESSAGES: 500
-      MP_SMTP_AUTH_ACCEPT_ANY: 1
-      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    networks:
+      - likhitex
 
-  # Redis (optional for local dev, use Upstash in prod)
-  # Uncomment if you want to test Redis locally
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: likhitex-redis
-  #   restart: unless-stopped
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis_data:/data
-  #   command: redis-server --appendonly yes
-  #   healthcheck:
-  #     test: ["CMD", "redis-cli", "ping"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
+  # ==========================================================================
+  # MinIO (S3-compatible storage for local R2 testing)
+  # ==========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: likhitex-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Web UI
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    networks:
+      - likhitex
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:
     driver: local
-  # redis_data:
-  #   driver: local
+  redis_data:
+    driver: local
+  api_storage:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  likhitex:
+    driver: bridge
+
+# ==========================================================================
+# Usage Instructions
+# ==========================================================================
+#
+# Start all services:
+#   docker-compose up
+#
+# Start in background:
+#   docker-compose up -d
+#
+# View logs:
+#   docker-compose logs -f
+#   docker-compose logs -f api
+#
+# Stop all services:
+#   docker-compose down
+#
+# Reset everything (DELETE ALL DATA):
+#   docker-compose down -v
+#
+# Rebuild after code changes:
+#   docker-compose up --build
+#
+# Run migrations:
+#   docker-compose exec api alembic upgrade head
+#
+# Access services:
+#   API: http://localhost:8000
+#   API Docs: http://localhost:8000/docs
+#   Frontend: Start separately with `cd frontend && npm run dev`
+#   Mailpit: http://localhost:8025
+#   MinIO Console: http://localhost:9001 (minioadmin / minioadmin)
+#   PostgreSQL: localhost:5432 (likhitex / likhitex_dev_password)
+#   Redis: localhost:6379
+#
+# ==========================================================================

@@ -7,15 +7,18 @@ Quota accounting: `Project.size_bytes` and `User.quota_used_bytes` are adjusted
 by the signed delta on every write, so both stay consistent across updates and
 deletes instead of drifting upward on each overwrite.
 """
+import asyncio
 import base64
 import binascii
 import hashlib
+import io
 import logging
 import os
 import posixpath
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +119,62 @@ def _decode_content(raw: str, extension: str) -> tuple[bytes, str | None]:
         ) from exc
 
 
+def _optimize_image(content_bytes: bytes, extension: str) -> bytes:
+    """
+    Resize and compress raster images on upload.
+
+    Rules (research-backed, see docs):
+    - Max longest side 1200 px; larger images are the main compilation bottleneck
+      for PNG because pdfLaTeX must decompress and recompress every pixel.
+    - PNG: strip interlacing, max compression.
+    - JPEG: 85 % quality, RGB (drop alpha, which pdfLaTeX cannot embed).
+    - GIF: no optimization path here; stored as-is.
+    - Any failure returns the original bytes so a broken image is never lost.
+    """
+    if extension not in {".png", ".jpg", ".jpeg"}:
+        return content_bytes
+
+    try:
+        img: Image.Image = Image.open(io.BytesIO(content_bytes))
+
+        MAX_DIMENSION = 1200
+        if max(img.size) > MAX_DIMENSION:
+            ratio = MAX_DIMENSION / max(img.size)
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            original_dims = img.size
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+            logger.info(
+                "Resized image from %dx%d to %dx%d",
+                original_dims[0], original_dims[1],
+                new_size[0], new_size[1],
+            )
+
+        output = io.BytesIO()
+        if extension == ".png":
+            img.save(output, format="PNG", optimize=True, compress_level=9)
+        elif extension in {".jpg", ".jpeg"}:
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.save(output, format="JPEG", quality=85, optimize=True, progressive=True)
+
+        optimized = output.getvalue()
+        original_size = len(content_bytes)
+        optimized_size = len(optimized)
+
+        if optimized_size < original_size:
+            savings = ((original_size - optimized_size) / original_size) * 100
+            logger.info(
+                "Image optimized: %d -> %d bytes (%.1f%% savings)",
+                original_size, optimized_size, savings,
+            )
+            return optimized
+
+        return content_bytes
+    except Exception as exc:
+        logger.warning("Image optimization failed, storing original: %s", exc)
+        return content_bytes
+
+
 async def _enforce_quota(
     db: AsyncSession,
     user: User,
@@ -131,11 +190,18 @@ async def _enforce_quota(
     if delta <= 0:
         return
 
-    if user.quota_used_bytes + delta > MAX_USER_BYTES:
+    # `quota_used_bytes` and `size_bytes` are nullable in the model; a fresh user
+    # or project has no stored value yet, which is treated as zero here rather
+    # than as an error. Without this guard, the first file upload on a brand-new
+    # account raises a TypeError instead of storing the file.
+    user_used = user.quota_used_bytes or 0
+    project_used = project.size_bytes or 0
+
+    if user_used + delta > MAX_USER_BYTES:
         raise QuotaExceeded(
             f"Storage quota exceeded: {settings.QUOTA_PER_USER_MB} MB per user"
         )
-    if project.size_bytes + delta > MAX_PROJECT_BYTES:
+    if project_used + delta > MAX_PROJECT_BYTES:
         raise QuotaExceeded(
             f"Project size limit reached: {settings.QUOTA_PER_PROJECT_MB} MB"
         )
@@ -143,8 +209,8 @@ async def _enforce_quota(
 
 async def _apply_delta(db: AsyncSession, user: User, project: Project, delta: int) -> None:
     """Adjust stored byte counters, clamped so rounding cannot go negative."""
-    project.size_bytes = max(0, project.size_bytes + delta)
-    user.quota_used_bytes = max(0, user.quota_used_bytes + delta)
+    project.size_bytes = max(0, (project.size_bytes or 0) + delta)
+    user.quota_used_bytes = max(0, (user.quota_used_bytes or 0) + delta)
 
 
 async def _get_file_or_404(db: AsyncSession, project: Project, file_id: UUID) -> File:
@@ -186,6 +252,13 @@ async def upload_file(
 
     if size_bytes > MAX_FILE_BYTES:
         raise QuotaExceeded(f"File exceeds the {settings.QUOTA_PER_FILE_MB} MB per-file limit")
+
+    # Optimize raster images before hashing and storing. This must come before
+    # the hash so the content-addressed key reflects the stored form, and it
+    # must come before the quota check so the quota reflects actual storage.
+    if extension in {".png", ".jpg", ".jpeg"}:
+        content_bytes = await asyncio.to_thread(_optimize_image, content_bytes, extension)
+        size_bytes = len(content_bytes)
 
     file_hash = hashlib.sha256(content_bytes).hexdigest()
     file_type = extension.lstrip(".")
@@ -386,6 +459,10 @@ async def update_file(
 
     if size_bytes > MAX_FILE_BYTES:
         raise QuotaExceeded(f"File exceeds the {settings.QUOTA_PER_FILE_MB} MB per-file limit")
+
+    if extension in {".png", ".jpg", ".jpeg"}:
+        content_bytes = await asyncio.to_thread(_optimize_image, content_bytes, extension)
+        size_bytes = len(content_bytes)
 
     delta = size_bytes - file.size_bytes
     await _enforce_quota(db, user, project, delta)

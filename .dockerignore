@@ -1,0 +1,22 @@
+# Only apps/api and apps/compiler/texmf.cnf are copied into images; keep the
+# build context small and free of secrets.
+**/node_modules
+**/.next
+**/venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.db
+**/.env
+**/.env.*
+apps/api/var
+apps/api/test_conn*.py
+frontend
+stitch_likhitex
+docs
+.git
+*.md
+!apps/compiler/README.md
+*.png

@@ -289,6 +289,7 @@ export default function ProjectsDashboard() {
               isSearching={isSearching || bucket !== "all"}
               onClearSearch={() => setSearch("")}
               onCreate={() => setIsCreateBlankOpen(true)}
+              onUploadZip={handleArchiveImport}
             />
           ) : (
             <>

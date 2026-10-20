@@ -4,6 +4,7 @@ Storage module.
 from app.storage.backend import (
     LocalStorage,
     R2Storage,
+    S3Storage,
     StorageBackend,
     StorageError,
     get_storage,
@@ -13,6 +14,7 @@ from app.storage.backend import (
 __all__ = [
     "LocalStorage",
     "R2Storage",
+    "S3Storage",
     "StorageBackend",
     "StorageError",
     "get_storage",

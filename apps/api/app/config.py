@@ -44,13 +44,20 @@ class Settings(BaseSettings):
     REDIS_SOCKET_TIMEOUT: int = 5
     REDIS_REQUIRED: bool = False
 
-    # Storage (Cloudflare R2)
+    # Storage: "s3" (Backblaze B2 or any S3-compatible), "r2", or "local"
+    STORAGE_BACKEND: Literal["local", "r2", "s3"] = "local"
+    S3_ENDPOINT_URL: str = ""  # e.g. https://s3.us-west-004.backblazeb2.com
+    S3_ACCESS_KEY_ID: str = ""  # Backblaze: keyID
+    S3_SECRET_ACCESS_KEY: str = ""  # Backblaze: applicationKey
+    S3_BUCKET_NAME: str = ""
+    S3_REGION: str = ""  # Derived from S3_ENDPOINT_URL when empty
     R2_ACCOUNT_ID: str = ""
     R2_ACCESS_KEY_ID: str = ""
     R2_SECRET_ACCESS_KEY: str = ""
     R2_BUCKET_NAME: str = "likhitex-files"
     R2_PUBLIC_URL: str = ""
-    LOCAL_STORAGE_PATH: str = "./var/storage"
+    # Development only: ephemeral on Render, so production uses s3/r2.
+    LOCAL_STORAGE_PATH: str = "/tmp/likhitex-files"  # noqa: S108
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
@@ -155,8 +162,13 @@ class Settings(BaseSettings):
                 raise ValueError(f"CORS origin must use https in production: {origin}")
         if self.MAIL_BACKEND == "smtp":
             raise ValueError("MAIL_BACKEND=smtp is not supported in production")
-        if not self.R2_REQUIRED_OK:
-            raise ValueError("R2 credentials are required in production")
+        if self.STORAGE_BACKEND == "r2" and not self.R2_REQUIRED_OK:
+            raise ValueError("R2 credentials are required when STORAGE_BACKEND=r2")
+        if self.STORAGE_BACKEND == "s3" and not self.S3_REQUIRED_OK:
+            raise ValueError(
+                "S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY and S3_BUCKET_NAME "
+                "are required when STORAGE_BACKEND=s3"
+            )
         if self.COMPILE_BACKEND == "local" and not self.COMPILE_IMAGE:
             raise ValueError("COMPILE_IMAGE must be set when COMPILE_BACKEND=local")
         if self.COMPILE_BACKEND == "remote" and not (
@@ -171,6 +183,16 @@ class Settings(BaseSettings):
     def R2_REQUIRED_OK(self) -> bool:
         """True when R2 credentials are present."""
         return bool(self.R2_ACCOUNT_ID and self.R2_ACCESS_KEY_ID and self.R2_SECRET_ACCESS_KEY)
+
+    @property
+    def S3_REQUIRED_OK(self) -> bool:
+        """True when S3-compatible storage settings are present."""
+        return bool(
+            self.S3_ENDPOINT_URL
+            and self.S3_ACCESS_KEY_ID
+            and self.S3_SECRET_ACCESS_KEY
+            and self.S3_BUCKET_NAME
+        )
 
     @property
     def sqlalchemy_database_url(self) -> str:

@@ -1,286 +1,427 @@
 import Image from "next/image";
 import Link from "next/link";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { CheckCircle, Lock, Users, Zap, Shield, FileText } from "lucide-react";
 import { currentUser } from "@clerk/nextjs/server";
+import {
+  ArrowRight,
+  Blocks,
+  FileStack,
+  History,
+  Lock,
+  ShieldCheck,
+  Terminal,
+  Users,
+} from "lucide-react";
+
+import { buttonVariants } from "@/components/ui/button";
 import { UserMenu } from "@/components/ui/user-menu";
+import Reveal from "@/components/landing/Reveal";
+import ScrollProgress from "@/components/landing/ScrollProgress";
+
+/**
+ * Marketing page.
+ *
+ * Written against the research rather than a template: manus.im and godly.design
+ * both set a serif headline at weight 400-500 and keep body copy at 14-16px, so
+ * the type here is deliberately smaller and lighter than the app's own dense UI.
+ * The `.landing` scope in `globals.css` owns the scale so the app keeps its 13px
+ * base.
+ *
+ * Every claim here is checkable. The earlier version of this page advertised
+ * "200+ active users, 10k+ documents, 99.9% uptime" and linked to `#` from the
+ * footer; the numbers were invented and the links went nowhere. Where a number
+ * would have gone there is now the actual compiler invocation, which is both true
+ * and more interesting to the audience this product is for.
+ */
+
+const NAV_LINKS = [
+  { href: "#capabilities", label: "Capabilities" },
+  { href: "#security", label: "Security" },
+  { href: "#access", label: "Access" },
+];
+
+const CAPABILITIES = [
+  {
+    icon: Terminal,
+    title: "A real LaTeX toolchain",
+    body: "A full TeX Live distribution with the packages academic work actually needs. No curated subset, no waiting for a build to finish.",
+  },
+  {
+    icon: Blocks,
+    title: "Compile as you type",
+    body: "Every save queues a build and streams the PDF back beside the source. Errors arrive as diagnostics you can click straight to the offending line.",
+  },
+  {
+    icon: Users,
+    title: "Roles, not shared accounts",
+    body: "Owners, editors and viewers are distinct. A viewer can read and compile but every write is refused by the API rather than merely hidden in the UI.",
+  },
+  {
+    icon: History,
+    title: "History you can return to",
+    body: "Snapshots are kept per project, diffed on request, and restorable. Compare two revisions before overwriting either one.",
+  },
+  {
+    icon: FileStack,
+    title: "Bring the whole project",
+    body: "Import a ZIP and the tree, assets and bibliography arrive intact. Export whenever you need to move to a local TeX installation.",
+  },
+];
+
+/** Mirrors `LocalCompileBackend._docker_argv`, with the image name as configured. */
+const SANDBOX_ARGV = [
+  "docker run --rm -i \\",
+  "  --network none \\",
+  "  --read-only \\",
+  "  --tmpfs /compile:rw,noexec,nosuid,size=200m \\",
+  "  --tmpfs /tmp:rw,noexec,nosuid,size=100m \\",
+  "  --cap-drop ALL --security-opt no-new-privileges \\",
+  "  --pids-limit 50 --memory 1g --memory-swap 1g --cpus 2 \\",
+  "  likhitex-compiler",
+];
 
 export default async function LandingPage() {
   const user = await currentUser();
 
   return (
-    <div className="min-h-screen bg-surface">
-      {/* Sticky Navigation */}
-      <nav className="sticky top-0 z-50 bg-surface-container-lowest border-b border-[#E5E7EB] backdrop-blur-sm">
-        <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center">
-            <Image
-              src="/logo.png"
-              alt="Likhitex"
-              width={140}
-              height={40}
-              priority
-              className="h-8 w-auto"
-            />
-          </div>
+    <div className="landing min-h-screen bg-surface text-on-surface">
+      <ScrollProgress />
 
-          <div className="hidden md:flex items-center gap-6 text-sm text-on-surface-variant">
-            <a href="#features" className="hover:text-on-surface transition-colors">
-              Features
-            </a>
-            <a href="#security" className="hover:text-on-surface transition-colors">
-              Security
-            </a>
-          </div>
+      {/* Header. 56px, matching the height both reference sites use, so the page
+          does not open with a chunky bar the way the previous version did. */}
+      <header className="sticky top-0 z-40 border-b border-surface-container-high bg-surface/85 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-6 lg:px-8">
+          <Link href="/" className="flex items-center gap-2">
+            <Image src="/logo.png" alt="Likhitex" width={200} height={56} priority className="h-10 w-auto" />
+          </Link>
+
+          <nav className="hidden items-center gap-7 md:flex" aria-label="Sections">
+            {NAV_LINKS.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                className="text-[length:var(--step--1)] text-on-surface-variant transition-colors hover:text-on-surface"
+              >
+                {link.label}
+              </a>
+            ))}
+          </nav>
 
           {user ? (
-            <div className="flex items-center gap-3">
-              <Link href="/projects" className={buttonVariants({ variant: "primary", size: "md" })}>
-                <FileText className="w-4 h-4" />
-                Open Editor
+            <div className="flex items-center gap-2">
+              <Link
+                href="/projects"
+                className={buttonVariants({ variant: "primary", size: "md" })}
+              >
+                Open editor
               </Link>
               <UserMenu />
             </div>
           ) : (
-            <Link href="/sign-in" className={buttonVariants({ variant: "primary", size: "md" })}>
-              Sign in
+            <div className="flex items-center gap-2">
+              <Link
+                href="/sign-in"
+                className="px-2 text-[length:var(--step--1)] font-medium text-on-surface-variant transition-colors hover:text-on-surface"
+              >
+                Sign in
+              </Link>
+              <Link
+                href="/sign-up"
+                className={buttonVariants({ variant: "primary", size: "md" })}
+              >
+                Create account
+              </Link>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Hero */}
+      <section className="relative overflow-hidden">
+        {/* A wide, very low-contrast wash behind the headline. Kept faint on
+            purpose: the reference pages get their depth from type and space,
+            not from a gradient panel. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 -top-32 h-[420px] bg-[radial-gradient(60%_60%_at_50%_40%,var(--color-primary-fixed)_0%,transparent_70%)] opacity-70"
+        />
+
+        <div className="relative mx-auto max-w-7xl px-6 pt-16 pb-14 sm:pt-20 sm:pb-16 lg:px-8">
+          <div className="flex items-center gap-2 text-[length:var(--step--1)] font-medium text-on-surface-variant">
+            <Lock className="h-3.5 w-3.5 text-primary" />
+            <span>Invite-only workspace</span>
+          </div>
+
+          <h1 className="mt-5 max-w-[16ch] text-[length:var(--step-4)] font-medium text-on-surface">
+            LaTeX your research group can actually work in together
+          </h1>
+
+          <p className="mt-5 max-w-[58ch] text-[length:var(--step-1)] leading-relaxed text-on-surface-variant">
+            Likhitex compiles on a real TeX Live toolchain, keeps every build inside a
+            locked-down container, and gives each collaborator exactly the access their
+            role allows. Built for groups writing one document rather than one person
+            writing alone.
+          </p>
+
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            {user ? (
+              <Link
+                href="/projects"
+                className={buttonVariants({ variant: "primary", size: "lg" })}
+              >
+                Open editor
+                <ArrowRight className="ml-1 h-4 w-4" />
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/sign-up"
+                  className={buttonVariants({ variant: "primary", size: "lg" })}
+                >
+                  Create account
+                  <ArrowRight className="ml-1 h-4 w-4" />
+                </Link>
+                <Link
+                  href="/sign-in"
+                  className={buttonVariants({ variant: "outline", size: "lg" })}
+                >
+                  Sign in
+                </Link>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Product view. A miniature of the actual editor, in the app's own
+            palette and syntax colours, rather than grey placeholder bars. */}
+        <div className="relative mx-auto max-w-7xl px-6 pb-16 lg:px-8">
+          <div className="overflow-hidden rounded-lg border border-surface-container-high bg-surface-container-lowest shadow-[0_1px_2px_rgba(25,28,30,0.04),0_12px_32px_-12px_rgba(25,28,30,0.12)]">
+            <div className="flex items-center gap-2 border-b border-surface-container-high bg-surface-container-low px-3 py-2">
+              <span className="font-mono text-[11px] text-outline">main.tex</span>
+              <span className="ml-auto flex items-center gap-1.5 text-[11px] text-secondary">
+                <span className="h-1.5 w-1.5 rounded-full bg-secondary" />
+                Saved
+              </span>
+            </div>
+
+            <div className="grid grid-cols-[168px_1fr] sm:grid-cols-[200px_1fr_1fr]">
+              {/* File tree */}
+              <div className="hidden border-r border-surface-container-high px-2 py-2.5 sm:block">
+                {["sections/", "  introduction.tex", "  method.tex", "figures/", "  arch.pdf", "references.bib"].map(
+                  (entry) => (
+                    <div
+                      key={entry}
+                      className={`truncate rounded px-1.5 py-1 font-mono text-[11px] ${
+                        entry.includes("method.tex")
+                          ? "bg-primary-fixed text-primary"
+                          : "text-on-surface-variant"
+                      }`}
+                    >
+                      {entry}
+                    </div>
+                  ),
+                )}
+              </div>
+
+              {/* Source, coloured as CodeEditor renders it */}
+              <div className="border-r border-surface-container-high px-3 py-2.5 font-mono text-[11px] leading-[17px]">
+                <div>
+                  <span className="text-[#4F46E5]">\section</span>
+                  <span className="text-[#464555]">&#123;Method&#125;</span>
+                </div>
+                <div className="text-outline">&#32;</div>
+                <div>
+                  <span className="text-[#4F46E5]">We</span>{" "}
+                  <span className="text-[#0F766E]">train</span>
+                </div>
+                <div>
+                  {"the model on "}
+                  <span className="text-[#2563EB]">\cite</span>
+                  <span className="text-[#464555]">&#123;krizhevsky&#125;</span>
+                </div>
+                <div className="text-[#2563EB]">{"\includegraphics"}</div>
+                <div className="text-[#464555]">&#123;figures/arch&#125;</div>
+                <div className="text-[#6B7280] italic">{"% compiles on every save"}</div>
+              </div>
+
+              {/* Rendered page */}
+              <div className="hidden px-4 py-3 sm:block">
+                <div className="text-[13px] font-semibold text-on-surface">2 Method</div>
+                <div className="mt-2 space-y-1.5">
+                  <div className="h-1.5 w-4/5 rounded-full bg-surface-container-high" />
+                  <div className="h-1.5 w-full rounded-full bg-surface-container-high" />
+                  <div className="h-1.5 w-11/12 rounded-full bg-surface-container-high" />
+                </div>
+                <div className="mt-4 flex h-16 items-center justify-center rounded border border-surface-container-high bg-surface-container-low text-[11px] text-outline">
+                  figure
+                </div>
+                <div className="mt-3 space-y-1.5">
+                  <div className="h-1.5 w-full rounded-full bg-surface-container-high" />
+                  <div className="h-1.5 w-3/4 rounded-full bg-surface-container-high" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Dissolves the hero's wash into the page instead of a hard seam. */}
+          <div aria-hidden="true" className="landing-edge pointer-events-none h-12 w-full" />
+        </div>
+      </section>
+
+      {/* Capabilities. Rows with hairline separators rather than a grid of
+          coloured icon squares, which is the pattern both reference sites
+          avoid and which reads as generic. */}
+      <section id="capabilities" className="mx-auto max-w-7xl px-6 py-14 sm:py-16 lg:px-8">
+        <Reveal>
+          <h2 className="max-w-[20ch] text-[length:var(--step-3)] font-medium text-on-surface">
+            Everything a thesis needs, nothing it does not
+          </h2>
+        </Reveal>
+
+        <div className="mt-9 divide-y divide-surface-container-high border-y border-surface-container-high">
+          {CAPABILITIES.map((item, index) => (
+            <Reveal key={item.title} delay={index * 60}>
+              <div className="grid gap-x-8 gap-y-2 py-5 sm:grid-cols-[minmax(0,15rem)_1fr] sm:py-6">
+                <div className="flex items-center gap-2.5">
+                  <item.icon className="h-4 w-4 shrink-0 text-primary" />
+                  <h3 className="text-[length:var(--step-0)] font-semibold text-on-surface">
+                    {item.title}
+                  </h3>
+                </div>
+                <p className="text-[length:var(--step--1)] leading-relaxed text-on-surface-variant">
+                  {item.body}
+                </p>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* Security. The mechanism, not a checklist of adjectives. */}
+      <section id="security" className="border-y border-surface-container-high bg-surface-container-low">
+        <div className="mx-auto max-w-7xl px-6 py-14 sm:py-16 lg:px-8">
+          <Reveal>
+            <div className="flex items-center gap-2 text-[length:var(--step--1)] font-medium text-on-surface-variant">
+              <ShieldCheck className="h-4 w-4 text-primary" />
+              <span>Compilation sandbox</span>
+            </div>
+            <h2 className="mt-4 max-w-[24ch] text-[length:var(--step-3)] font-medium text-on-surface">
+              A submitted document should never be able to reach the machine
+            </h2>
+            <p className="mt-4 max-w-[58ch] text-[length:var(--step--1)] leading-relaxed text-on-surface-variant">
+              A thesis will eventually contain a package you have not read. Every build
+              runs in a throwaway container with no network, no capabilities and an
+              immutable root filesystem, so a document can read its own files and nothing
+              else. The invocation is fixed in the backend rather than assembled per
+              request, which is why the isolation tests can assert on it.
+            </p>
+          </Reveal>
+
+          <Reveal delay={80}>
+            <pre className="mt-7 overflow-x-auto rounded-lg border border-surface-container-high bg-surface-container-lowest p-4 font-mono text-[11.5px] leading-[18px] text-on-surface">
+              <code>{SANDBOX_ARGV.join("\n")}</code>
+            </pre>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* Access */}
+      <section id="access" className="mx-auto max-w-7xl px-6 py-14 sm:py-16 lg:px-8">
+        <Reveal>
+          <div className="grid gap-8 sm:grid-cols-[1fr_auto] sm:items-center">
+            <div>
+              <h2 className="max-w-[22ch] text-[length:var(--step-3)] font-medium text-on-surface">
+                Access is granted per person, not opened to the public
+              </h2>
+              <p className="mt-4 max-w-[54ch] text-[length:var(--step--1)] leading-relaxed text-on-surface-variant">
+                An account is not an invitation to a project. Until someone with access
+                adds you, the API refuses every read and write on it, and signing in
+                takes you to a page that says so rather than an empty dashboard.
+              </p>
+            </div>
+            <Link href="/no-access" className={buttonVariants({ variant: "outline", size: "lg" })}>
+              No access yet?
+            </Link>
+          </div>
+        </Reveal>
+      </section>
+
+      {/* Closing call to action */}
+      <section className="border-t border-surface-container-high bg-surface-container-low">
+        <div className="mx-auto flex max-w-7xl flex-col gap-5 px-6 py-12 sm:flex-row sm:items-center sm:justify-between lg:px-8">
+          <h2 className="max-w-[20ch] text-[length:var(--step-2)] font-medium text-on-surface">
+            Start with a document you already have
+          </h2>
+          {user ? (
+            <Link href="/projects" className={buttonVariants({ variant: "primary", size: "lg" })}>
+              Open editor
+              <ArrowRight className="ml-1 h-4 w-4" />
+            </Link>
+          ) : (
+            <Link href="/sign-up" className={buttonVariants({ variant: "primary", size: "lg" })}>
+              Create account
+              <ArrowRight className="ml-1 h-4 w-4" />
             </Link>
           )}
         </div>
-      </nav>
+      </section>
 
-      {/* Hero Section */}
-      <section className="max-w-7xl mx-auto px-6 py-20 lg:py-28">
-        <div className="grid lg:grid-cols-2 gap-12 items-center">
-          {/* Left: Text Content */}
-          <div className="space-y-6">
-            <h1 className="text-4xl lg:text-5xl font-bold tracking-tight text-on-surface leading-tight">
-              Write LaTeX together,{" "}
-              <span className="text-primary">without the limits</span>
-            </h1>
-            <p className="text-lg text-on-surface-variant leading-relaxed">
-              A private collaborative LaTeX editor for your group. Real-time editing,
-              instant PDF preview, and secure sandboxed compilation.
+      {/* Footer. Only links to routes that exist. */}
+      <footer className="border-t border-surface-container-high">
+        <div className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-9 sm:flex-row sm:items-start sm:justify-between lg:px-8">
+          <div>
+            <Image src="/logo.png" alt="Likhitex" width={96} height={28} className="h-6 w-auto" />
+            <p className="mt-2 text-[length:var(--step--1)] text-outline">
+              Collaborative LaTeX for research groups.
             </p>
-            {user ? (
-              <div className="space-y-4">
-                <div className="flex items-center gap-3 p-4 bg-primary-fixed/20 border border-primary/20 rounded-lg">
-                  <div className="w-10 h-10 rounded-full bg-primary text-white flex items-center justify-center font-semibold">
-                    {user.firstName?.[0] || user.emailAddresses[0]?.emailAddress[0].toUpperCase()}
-                  </div>
-                  <div>
-                    <p className="font-medium text-on-surface">
-                      Welcome back, {user.firstName || "there"}!
-                    </p>
-                    <p className="text-sm text-on-surface-variant">
-                      {user.emailAddresses[0]?.emailAddress}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <Link href="/projects" className={buttonVariants({ variant: "primary", size: "lg", className: "w-full sm:w-auto" })}>
-                    <FileText className="w-4 h-4" />
-                    Open Editor
+          </div>
+
+          <div className="flex gap-10 text-[length:var(--step--1)]">
+            <div>
+              <h3 className="mb-2 font-semibold text-on-surface">Product</h3>
+              <ul className="space-y-1.5">
+                <li>
+                  <Link href="/projects" className="text-on-surface-variant transition-colors hover:text-on-surface">
+                    Editor
                   </Link>
-                  <Button variant="outline" size="lg" className="w-full sm:w-auto">
-                    View My Projects
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <Link href="/sign-in" className={buttonVariants({ variant: "primary", size: "lg", className: "w-full sm:w-auto" })}>
+                </li>
+                <li>
+                  <a href="#capabilities" className="text-on-surface-variant transition-colors hover:text-on-surface">
+                    Capabilities
+                  </a>
+                </li>
+                <li>
+                  <a href="#security" className="text-on-surface-variant transition-colors hover:text-on-surface">
+                    Security
+                  </a>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="mb-2 font-semibold text-on-surface">Account</h3>
+              <ul className="space-y-1.5">
+                <li>
+                  <Link href="/sign-in" className="text-on-surface-variant transition-colors hover:text-on-surface">
                     Sign in
                   </Link>
-                  <Button variant="outline" size="lg" className="w-full sm:w-auto">
-                    Request an invite
-                  </Button>
-                </div>
-                <p className="text-xs text-on-surface-variant flex items-center gap-2">
-                  <Lock className="w-3.5 h-3.5" />
-                  Invite-only • 200 trusted members • Private workspace
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* Right: Editor Mock */}
-          <div className="bg-surface-container-lowest rounded-lg border border-[#E5E7EB] shadow-lg overflow-hidden">
-            <div className="bg-surface-container-low px-4 py-2 border-b border-[#E5E7EB] flex items-center gap-2">
-              <div className="w-3 h-3 rounded-full bg-error"></div>
-              <div className="w-3 h-3 rounded-full bg-tertiary"></div>
-              <div className="w-3 h-3 rounded-full bg-secondary"></div>
-              <span className="ml-2 text-xs font-mono text-on-surface-variant">
-                thesis-draft.tex
-              </span>
-            </div>
-            <div className="grid grid-cols-2">
-              <div className="p-4 bg-surface-container-lowest font-mono text-xs space-y-1">
-                <div className="text-on-surface-variant">
-                  <span className="text-primary">\documentclass</span>
-                  {"{article}"}
-                </div>
-                <div className="text-on-surface-variant">
-                  <span className="text-primary">\begin</span>
-                  {"{document}"}
-                </div>
-                <div className="text-on-surface ml-4">
-                  <span className="text-primary">\section</span>
-                  {"{Introduction}"}
-                </div>
-                <div className="text-on-surface ml-4">
-                  This is collaborative...
-                </div>
-                <div className="text-on-surface-variant">
-                  <span className="text-primary">\end</span>
-                  {"{document}"}
-                </div>
-              </div>
-              <div className="p-4 bg-[#f5f5f5] text-xs text-on-surface-variant">
-                <div className="font-bold text-sm mb-2">PDF Preview</div>
-                <div className="space-y-1">
-                  <div className="h-2 bg-surface-container rounded w-3/4"></div>
-                  <div className="h-2 bg-surface-container rounded w-full"></div>
-                  <div className="h-2 bg-surface-container rounded w-5/6"></div>
-                </div>
-              </div>
+                </li>
+                <li>
+                  <Link href="/sign-up" className="text-on-surface-variant transition-colors hover:text-on-surface">
+                    Create account
+                  </Link>
+                </li>
+                <li>
+                  <Link href="/settings" className="text-on-surface-variant transition-colors hover:text-on-surface">
+                    Settings
+                  </Link>
+                </li>
+              </ul>
             </div>
           </div>
         </div>
-      </section>
 
-      {/* Features Section */}
-      <section id="features" className="bg-surface-container-lowest py-20">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="text-center mb-12">
-            <h2 className="text-3xl font-bold text-on-surface mb-3">
-              Built for academic collaboration
-            </h2>
-            <p className="text-on-surface-variant">
-              Everything you need to write papers, theses, and research documents together
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-3 gap-8">
-            {/* Feature 1 */}
-            <div className="space-y-3">
-              <div className="w-10 h-10 rounded-lg bg-primary-fixed flex items-center justify-center">
-                <Users className="w-5 h-5 text-primary" />
-              </div>
-              <h3 className="font-semibold text-on-surface">Real-time collaboration</h3>
-              <p className="text-sm text-on-surface-variant leading-relaxed">
-                See your co-authors&apos; cursors and edits in real time. No conflicts, no
-                lost work.
-              </p>
-            </div>
-
-            {/* Feature 2 */}
-            <div className="space-y-3">
-              <div className="w-10 h-10 rounded-lg bg-secondary-container/20 flex items-center justify-center">
-                <Zap className="w-5 h-5 text-secondary" />
-              </div>
-              <h3 className="font-semibold text-on-surface">Instant PDF preview</h3>
-              <p className="text-sm text-on-surface-variant leading-relaxed">
-                Compile on save with fast feedback. See errors highlighted in your source
-                code.
-              </p>
-            </div>
-
-            {/* Feature 3 */}
-            <div className="space-y-3">
-              <div className="w-10 h-10 rounded-lg bg-tertiary-fixed/40 flex items-center justify-center">
-                <Shield className="w-5 h-5 text-tertiary" />
-              </div>
-              <h3 className="font-semibold text-on-surface">Private and secure</h3>
-              <p className="text-sm text-on-surface-variant leading-relaxed">
-                Invite-only access. Your documents never leave our secure sandbox.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Security Section */}
-      <section id="security" className="py-20">
-        <div className="max-w-4xl mx-auto px-6">
-          <div className="text-center mb-12">
-            <h2 className="text-3xl font-bold text-on-surface mb-3">Built for safety</h2>
-            <p className="text-on-surface-variant">
-              Security and privacy are fundamental to how we built Likhitex
-            </p>
-          </div>
-
-          <div className="grid sm:grid-cols-2 gap-6">
-            <div className="flex gap-3">
-              <CheckCircle className="w-5 h-5 text-secondary flex-shrink-0 mt-0.5" />
-              <div>
-                <h4 className="font-medium text-on-surface mb-1">
-                  Sandboxed compilation
-                </h4>
-                <p className="text-sm text-on-surface-variant">
-                  LaTeX runs in isolated containers with no network access
-                </p>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <CheckCircle className="w-5 h-5 text-secondary flex-shrink-0 mt-0.5" />
-              <div>
-                <h4 className="font-medium text-on-surface mb-1">Invite-only access</h4>
-                <p className="text-sm text-on-surface-variant">
-                  Only approved members can join your workspace
-                </p>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <CheckCircle className="w-5 h-5 text-secondary flex-shrink-0 mt-0.5" />
-              <div>
-                <h4 className="font-medium text-on-surface mb-1">Private storage</h4>
-                <p className="text-sm text-on-surface-variant">
-                  Your files are encrypted and stored securely
-                </p>
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <CheckCircle className="w-5 h-5 text-secondary flex-shrink-0 mt-0.5" />
-              <div>
-                <h4 className="font-medium text-on-surface mb-1">Regular backups</h4>
-                <p className="text-sm text-on-surface-variant">
-                  Automated daily backups with tested restore procedures
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Footer */}
-      <footer className="border-t border-[#E5E7EB] bg-surface-container-lowest">
-        <div className="max-w-7xl mx-auto px-6 py-8">
-          <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-            <div className="flex items-center gap-3">
-              <Image
-                src="/logo.png"
-                alt="Likhitex"
-                width={120}
-                height={40}
-                className="h-6 w-auto"
-              />
-              <span className="text-sm text-on-surface-variant">
-                © 2026 Private workspace.
-              </span>
-            </div>
-            <div className="flex items-center gap-6 text-sm text-on-surface-variant">
-              <a href="#" className="hover:text-on-surface transition-colors">
-                Privacy
-              </a>
-              <a href="#" className="hover:text-on-surface transition-colors">
-                Contact
-              </a>
-            </div>
+        <div className="border-t border-surface-container-high">
+          <div className="mx-auto max-w-7xl px-6 py-5 text-[length:var(--step--1)] text-outline lg:px-8">
+            © {new Date().getFullYear()} Likhitex
           </div>
         </div>
       </footer>

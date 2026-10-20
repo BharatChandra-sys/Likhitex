@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import React, { Suspense, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -35,7 +35,9 @@ type Step =
   | { kind: "password" }
   | { kind: "email_code" }
   | { kind: "email_link_sent" }
-  | { kind: "second_factor" };
+  | { kind: "second_factor" }
+  | { kind: "forgot_password" }
+  | { kind: "reset_password"; code: string };
 
 const DEFAULT_REDIRECT = "/projects";
 
@@ -105,7 +107,7 @@ function humanise(code: unknown, fallback: string | null): string | null {
 
 function SignInForm() {
   const { signIn } = useSignIn();
-  const { isLoaded } = useAuth();
+  const { isLoaded, isSignedIn } = useAuth();
   const router = useRouter();
   const redirectTarget = useRedirectTarget();
 
@@ -113,11 +115,29 @@ function SignInForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Redirect if already signed in
+  React.useEffect(() => {
+    if (isLoaded && isSignedIn) {
+      router.replace(redirectTarget);
+    }
+  }, [isLoaded, isSignedIn, router, redirectTarget]);
+
   const isBusy = isSubmitting || !isLoaded || !signIn;
   const identifier = email.trim();
+
+  // Show loading state if checking auth or already signed in
+  if (!isLoaded || isSignedIn) {
+    return (
+      <div className="min-h-screen bg-math-grid flex items-center justify-center p-6 select-none">
+        <div className="text-sm text-on-surface-variant">Loading...</div>
+        <style jsx global>{mathGridStyles}</style>
+      </div>
+    );
+  }
 
   /** Activates the freshly created session and returns to the requested page. */
   const completeSignIn = async () => {
@@ -146,6 +166,10 @@ function SignInForm() {
 
     if (signIn.status === "needs_first_factor") {
       const strategy = signIn.supportedFirstFactors[0]?.strategy;
+      
+      // Debug: Log available strategies
+      console.log("Available first factors:", signIn.supportedFirstFactors);
+      console.log("Selected strategy:", strategy);
 
       if (strategy === "password") {
         setStep({ kind: "password" });
@@ -349,6 +373,7 @@ function SignInForm() {
   const startOver = async () => {
     setPassword("");
     setCode("");
+    setNewPassword("");
     setError(null);
     setStep({ kind: "identifier" });
     // `reset` clears Clerk's attempt so the next `create` starts clean; a failure
@@ -356,45 +381,68 @@ function SignInForm() {
     await signIn.reset().catch(() => undefined);
   };
 
-  return (
-    <div className="min-h-screen bg-math-grid flex flex-col justify-between p-6 sm:p-10 select-none">
-      {/* Top Header */}
-      <header className="max-w-[1360px] w-full mx-auto flex items-center justify-between pb-6 border-b border-[#E5E7EB] mb-8">
-        <div className="flex items-center gap-3">
-          <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-            <Image
-              src="/logo.png"
-              alt="Likhitex"
-              width={140}
-              height={40}
-              priority
-              className="h-8 w-auto"
-            />
-            <span className="text-xs px-2 py-0.5 rounded bg-[#EEF2FF] text-[#4F46E5] font-mono font-medium border border-[#E0E7FF]">
-              v0.9.4-private
-            </span>
-          </Link>
-        </div>
-        <div className="flex items-center gap-4">
-          <Link
-            href="/"
-            className="flex items-center gap-1.5 text-xs text-[#6B7280] hover:text-on-surface transition-colors"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Back to Home</span>
-          </Link>
-          <div className="hidden md:flex items-center gap-4 text-xs font-mono text-[#6B7280]">
-            <span className="text-[#D1D5DB]">|</span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-[#10B981]"></span>
-              <span>auth-cluster: ready</span>
-            </span>
-          </div>
-        </div>
-      </header>
+  /** Initiates password reset flow */
+  const forgotPassword = async () => {
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      // Step 1: Send the password reset code
+      const { error: sendCodeError } = await signIn.resetPasswordEmailCode.sendCode();
+      
+      const message = toMessage(sendCodeError);
+      if (message) {
+        setError(message);
+        return;
+      }
+      
+      setStep({ kind: "forgot_password" });
+    } catch (cause) {
+      setError(toMessage(cause) ?? "Could not start password reset.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
+  /** Verifies reset code and sets new password */
+  const resetPassword = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      // Step 2: Verify the code
+      const { error: verifyError } = await signIn.resetPasswordEmailCode.verifyCode({ code });
+      
+      const verifyMessage = toMessage(verifyError);
+      if (verifyMessage) {
+        setError(verifyMessage);
+        return;
+      }
+
+      // Step 3: Submit the new password
+      const { error: submitError } = await signIn.resetPasswordEmailCode.submitPassword({
+        password: newPassword,
+        signOutOfOtherSessions: true,
+      });
+      
+      const submitMessage = toMessage(submitError);
+      if (submitMessage) {
+        setError(submitMessage);
+        return;
+      }
+      
+      // Password reset successful, complete sign in
+      await advance();
+    } catch (cause) {
+      setError(toMessage(cause) ?? "Could not reset password.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-math-grid flex items-center justify-center p-6 select-none">
       {/* Card */}
-      <main className="max-w-[1360px] w-full mx-auto my-auto py-4 flex justify-center">
+      <main className="w-full flex justify-center">
         <div className="w-full flex flex-col items-center">
           <div className="w-[420px] max-w-full bg-white rounded-md border border-[#E5E7EB] p-8 shadow-sm">
             <div className="flex flex-col items-center text-center">
@@ -505,14 +553,85 @@ function SignInForm() {
                   <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
                     {isSubmitting ? "Signing in..." : "Sign in"}
                   </Button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void forgotPassword()}
+                      className="w-full text-[11px] text-primary hover:text-primary/80 hover:underline underline-offset-2"
+                      disabled={isBusy}
+                    >
+                      Forgot password?
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void startOver()}
+                      className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
+                    >
+                      Use a different email
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {step.kind === "forgot_password" && (
+                <div className="space-y-3">
+                  <p className="text-xs text-on-surface-variant">
+                    We sent a password reset code to{" "}
+                    <span className="font-[family-name:var(--font-mono)] text-on-surface">
+                      {identifier}
+                    </span>
+                  </p>
+                  <form onSubmit={resetPassword} className="space-y-3">
+                    <div>
+                      <label
+                        htmlFor="reset-code"
+                        className="block text-xs font-medium text-[#374151] mb-1.5"
+                      >
+                        Reset code
+                      </label>
+                      <Input
+                        type="text"
+                        id="reset-code"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        placeholder="000000"
+                        value={code}
+                        onChange={(event) => setCode(event.target.value)}
+                        disabled={isBusy}
+                        required
+                        autoFocus
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="new-password"
+                        className="block text-xs font-medium text-[#374151] mb-1.5"
+                      >
+                        New password
+                      </label>
+                      <Input
+                        type="password"
+                        id="new-password"
+                        autoComplete="new-password"
+                        placeholder="Create a new password"
+                        value={newPassword}
+                        onChange={(event) => setNewPassword(event.target.value)}
+                        disabled={isBusy}
+                        required
+                      />
+                    </div>
+                    <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
+                      {isSubmitting ? "Resetting..." : "Reset password"}
+                    </Button>
+                  </form>
                   <button
                     type="button"
                     onClick={() => void startOver()}
                     className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
                   >
-                    Use a different email
+                    Back to sign in
                   </button>
-                </form>
+                </div>
               )}
 
               {step.kind === "email_code" && (
@@ -639,26 +758,18 @@ function SignInForm() {
             </div>
           </div>
 
-          {/* Links Below Card */}
-          <div className="mt-4 flex items-center justify-center gap-4 text-xs text-on-surface-variant">
-            <a
-              href="#privacy"
-              className="hover:text-on-surface hover:underline underline-offset-2 transition-colors"
+          {/* Navigation Links Below Card */}
+          <div className="mt-6 flex flex-col items-center gap-3">
+            <Link
+              href="/"
+              className="flex items-center gap-1.5 text-xs text-on-surface-variant hover:text-on-surface transition-colors"
             >
-              Privacy
-            </a>
-            <span className="text-[#D1D5DB]">•</span>
-            <a
-              href="#contact"
-              className="hover:text-on-surface hover:underline underline-offset-2 transition-colors"
-            >
-              Contact the admin
-            </a>
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to Home</span>
+            </Link>
           </div>
         </div>
       </main>
-
-      <div className="h-16"></div>
 
       <style jsx global>{mathGridStyles}</style>
     </div>

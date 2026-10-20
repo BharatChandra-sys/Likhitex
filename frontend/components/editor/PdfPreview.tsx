@@ -3,7 +3,8 @@
 /**
  * PDF Preview with page navigation controls.
  * 
- * Uses iframe for display with page navigation and zoom controls.
+ * Uses an iframe for display with page navigation and zoom controls. Zoom
+ * widens the iframe rather than CSS-scaling it, so text stays sharp.
  */
 
 import { useEffect, useState } from "react";
@@ -61,7 +62,11 @@ export default function PdfPreview({
     }
   }, [synctexBase64]);
 
-  // Create blob URL for PDF and get page count
+  // Create a blob URL for the PDF and read its page count.
+  //
+  // The URL is created and revoked by the same effect run, through a local
+  // variable: revoking the `pdfUrl` state from the cleanup would hit a stale
+  // closure and leak one full PDF per compile.
   useEffect(() => {
     if (!pdfBase64) {
       setPdfUrl(null);
@@ -70,34 +75,30 @@ export default function PdfPreview({
       return;
     }
 
-    const loadPdf = async () => {
+    const bytes = base64ToBytes(pdfBase64);
+    const url = URL.createObjectURL(
+      new Blob([bytes.slice().buffer as ArrayBuffer], { type: "application/pdf" }),
+    );
+    setPdfUrl(url);
+
+    let cancelled = false;
+    void (async () => {
       try {
-        const bytes = base64ToBytes(pdfBase64);
-        // Create a proper ArrayBuffer for Blob (TypeScript workaround)
-        const buffer = bytes.buffer.slice(0) as ArrayBuffer;
-        const blob = new Blob([buffer], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        setPdfUrl(url);
-
-        // Use PDF.js to get page count
-        if (typeof window !== 'undefined') {
-          const pdfjsLib = (await import('pdfjs-dist')) as any;
-          pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
-          const loadingTask = pdfjsLib.getDocument({ data: bytes });
-          const doc = await loadingTask.promise;
-          setTotalPages(doc.numPages);
-        }
+        const pdfjsLib = await import("pdfjs-dist");
+        pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+        // pdf.js transfers the buffer to its worker, so hand it a copy.
+        const task = pdfjsLib.getDocument({ data: bytes.slice() });
+        const doc = await task.promise;
+        if (!cancelled) setTotalPages(doc.numPages);
+        void task.destroy();
       } catch (err) {
-        console.error('Failed to load PDF:', err);
+        console.error("Failed to load PDF:", err);
       }
-    };
-
-    void loadPdf();
+    })();
 
     return () => {
-      if (pdfUrl) {
-        URL.revokeObjectURL(pdfUrl);
-      }
+      cancelled = true;
+      URL.revokeObjectURL(url);
     };
   }, [pdfBase64]);
 
@@ -122,15 +123,6 @@ export default function PdfPreview({
     if (!isNaN(pageNum)) {
       goToPage(pageNum);
     }
-  };
-
-  // Download PDF
-  const handleDownload = () => {
-    if (!pdfUrl) return;
-    const a = document.createElement('a');
-    a.href = pdfUrl;
-    a.download = 'document.pdf';
-    a.click();
   };
 
   return (
@@ -163,6 +155,11 @@ export default function PdfPreview({
                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
             }`}
             title={error || errorCount > 0 ? 'View errors' : 'View compile logs'}
+            aria-label={
+              errorCount > 0
+                ? `${errorCount} compile ${errorCount === 1 ? "error" : "errors"}`
+                : undefined
+            }
           >
             <FileText className="w-3.5 h-3.5" />
             <span>Logs</span>
@@ -178,15 +175,15 @@ export default function PdfPreview({
           {pdfUrl && (
             <>
               {/* Download */}
-              <button
-                type="button"
-                onClick={handleDownload}
+              <a
+                href={pdfUrl}
+                download="document.pdf"
                 className="h-7 w-7 rounded flex items-center justify-center text-gray-700 hover:bg-gray-100 transition-colors"
                 title="Download PDF"
                 aria-label="Download PDF"
               >
                 <Download className="w-3.5 h-3.5" />
-              </button>
+              </a>
               <div className="w-px h-4 bg-gray-200 mx-0.5" />
               
               {/* Page navigation */}
@@ -254,16 +251,28 @@ export default function PdfPreview({
       <div className="flex-1 overflow-auto bg-gray-100">
         {pdfUrl ? (
           <iframe
-            key={`page-${currentPage}-zoom-${zoom}`}
-            src={`${pdfUrl}#page=${currentPage}&zoom=${zoom}&toolbar=0&navpanes=0&scrollbar=1`}
-            className="w-full h-full border-0"
-            title="PDF Preview"
+            // Remount on page change: browsers ignore a fragment-only src update.
+            key={`page-${currentPage}`}
+            src={`${pdfUrl}#page=${currentPage}&toolbar=0&navpanes=0&scrollbar=1`}
+            className="h-full border-0 block"
+            style={{ width: `${zoom}%` }}
+            title="Compiled PDF preview"
           />
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-center gap-3 px-6">
             <div className="w-16 h-16 rounded-full bg-gray-200 flex items-center justify-center">
               <FileText className="w-8 h-8 text-gray-400" />
             </div>
+            {error && !isCompiling && (
+              <button
+                type="button"
+                onClick={onOpenLogs}
+                className="flex items-center gap-1.5 rounded bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100"
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>{error}</span>
+              </button>
+            )}
             <div className="space-y-1">
               <p className="text-sm font-medium text-gray-700">
                 {isCompiling ? "Compiling your document…" : "No preview yet"}

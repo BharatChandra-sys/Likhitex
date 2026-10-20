@@ -17,6 +17,7 @@
 
 import type { ComponentType, ReactNode } from "react";
 import { useMemo } from "react";
+import { cn } from "@/lib/utils";
 import {
   Image as ImageIcon,
   Link as LinkIcon,
@@ -158,6 +159,9 @@ export interface EditorToolbarProps {
   onCommand: (command: EditorCommand) => void;
   /** Rendered before the tools, e.g. the open-file chip. */
   leading?: ReactNode;
+  /** When true, the next compile skips image inclusion for speed. */
+  draftMode?: boolean;
+  onDraftModeChange?: (draft: boolean) => void;
 }
 
 export default function EditorToolbar({
@@ -167,6 +171,8 @@ export default function EditorToolbar({
   canEdit,
   onCommand,
   leading,
+  draftMode = false,
+  onDraftModeChange,
 }: EditorToolbarProps) {
   /**
    * Word count and size for the metrics on the right.
@@ -232,6 +238,27 @@ export default function EditorToolbar({
           >
             <Redo2 className="w-4 h-4" />
           </button>
+
+          {onDraftModeChange && (
+            <>
+              <div className="h-4 w-[1px] bg-surface-container-high mx-1" />
+              <button
+                type="button"
+                title={draftMode ? "Draft mode: images replaced with placeholders for fast compilation" : "Full quality: includes images"}
+                aria-label={draftMode ? "Disable draft mode" : "Enable draft mode"}
+                aria-pressed={draftMode}
+                onClick={() => onDraftModeChange(!draftMode)}
+                className={cn(
+                  "h-7 rounded px-2 text-[11px] font-medium transition-colors",
+                  draftMode
+                    ? "bg-tertiary/15 text-tertiary border border-tertiary/30"
+                    : "text-on-surface-variant border border-transparent hover:bg-surface-container-low",
+                )}
+              >
+                {draftMode ? "Draft" : "Full"}
+              </button>
+            </>
+          )}
         </div>
       )}
 

@@ -1,59 +1,42 @@
-"use client";
-
 import Link from "next/link";
-import { FileQuestion, Home, ArrowLeft } from "lucide-react";
 
 export default function NotFound() {
   return (
-    <div className="min-h-screen bg-neutral-50 flex flex-col items-center justify-center px-6">
-      <div className="max-w-md w-full text-center">
-        {/* Icon */}
-        <div className="mb-6 flex justify-center">
-          <div className="w-20 h-20 rounded-full bg-indigo-50 border-2 border-indigo-100 flex items-center justify-center">
-            <FileQuestion className="w-10 h-10 text-indigo-600" strokeWidth={1.5} />
+    <div className="min-h-screen flex items-center justify-center p-8 bg-gray-50">
+      <div className="bg-white border border-gray-200 rounded-md p-8 max-w-md w-full shadow-sm">
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200">
+              HTTP 404
+            </span>
+          </div>
+
+          {/* Quill-and-Bracket 404 Graphic */}
+          <div className="my-6 text-center">
+            <div className="inline-block text-3xl font-mono font-bold text-gray-300 tracking-wider">
+              [\ 404 /]
+            </div>
+            <h4 className="text-sm font-semibold text-gray-900 mt-2">Project not found</h4>
+            <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+              This document may have been deleted, renamed, or never existed in this campus cluster.
+            </p>
+          </div>
+
+          {/* Monospaced detail box */}
+          <div className="bg-gray-50 border border-gray-200 rounded p-3 text-[10px] font-mono text-gray-500 space-y-1">
+            <div>Status: Resource not found</div>
+            <div>Request ID: {Math.random().toString(36).substring(7)}</div>
           </div>
         </div>
 
-        {/* Error Code */}
-        <div className="text-6xl font-bold text-neutral-900 mb-2">404</div>
-
-        {/* Title */}
-        <h1 className="text-xl font-semibold text-neutral-900 mb-2">
-          Page not found
-        </h1>
-
-        {/* Description */}
-        <p className="text-sm text-neutral-600 mb-8 leading-relaxed">
-          The page you&apos;re looking for doesn&apos;t exist or has been moved. Check the
-          URL or head back to the dashboard.
-        </p>
-
-        {/* Actions */}
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+        {/* Action */}
+        <div className="pt-4 mt-4 border-t border-gray-100 flex items-center justify-between">
           <Link
             href="/projects"
-            className="h-10 px-4 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm flex items-center gap-2 transition-colors w-full sm:w-auto justify-center"
+            className="h-8 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded transition-colors w-full text-center flex items-center justify-center"
           >
-            <Home className="w-4 h-4" />
-            <span>Go to Dashboard</span>
+            Return to Dashboard
           </Link>
-          <button
-            onClick={() => window.history.back()}
-            className="h-10 px-4 bg-white hover:bg-neutral-50 text-neutral-700 text-sm font-medium border border-neutral-300 rounded-lg shadow-sm flex items-center gap-2 transition-colors w-full sm:w-auto justify-center"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Go Back</span>
-          </button>
-        </div>
-
-        {/* Footer Info */}
-        <div className="mt-10 pt-6 border-t border-neutral-200 text-xs text-neutral-500 font-mono">
-          <p>
-            Need help?{" "}
-            <Link href="/" className="text-indigo-600 hover:underline">
-              Contact support
-            </Link>
-          </p>
         </div>
       </div>
     </div>

@@ -140,7 +140,12 @@ describe("ProjectsTable", () => {
     await user.click(
       within(screen.getByRole("menu")).getByRole("menuitem", { name: "Rename" }),
     );
-    expect(onRename).toHaveBeenCalledWith(project);
+    // Rename is inline: the name becomes an input, and the new name is reported
+    // on submit.
+    const input = screen.getByDisplayValue(project.name);
+    await user.clear(input);
+    await user.type(input, "Renamed project{Enter}");
+    expect(onRename).toHaveBeenCalledWith(project, "Renamed project");
 
     await user.click(screen.getByRole("button", { name: "More options" }));
     await user.click(
@@ -152,15 +157,15 @@ describe("ProjectsTable", () => {
   it("disables duplicate and download when no handler is supplied", () => {
     renderTable({ onDuplicate: undefined, onDownload: undefined });
 
-    expect(screen.getByTitle("Duplicating is not implemented yet")).toBeDisabled();
-    expect(screen.getByTitle("Downloading a ZIP is not implemented yet")).toBeDisabled();
+    expect(screen.getByTitle("Duplicate not available yet")).toBeDisabled();
+    expect(screen.getByTitle("Download not available yet")).toBeDisabled();
   });
 
   it("enables those actions once a handler is supplied", () => {
     renderTable({ onDuplicate: vi.fn(), onDownload: vi.fn() });
 
     expect(screen.getByTitle("Duplicate")).toBeEnabled();
-    expect(screen.getByTitle("Download project as ZIP")).toBeEnabled();
+    expect(screen.getByTitle("Download as ZIP")).toBeEnabled();
   });
 
   it("disables a row's actions while that row has a pending mutation", () => {

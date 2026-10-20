@@ -42,6 +42,15 @@ export const authAppearance = {
     footerAction: "hidden",
     footerActionLink: "hidden",
     identityPreview: "rounded-lg",
+
+    // Hide Clerk branding footer completely
+    footer: "hidden",
+    footerPages: "hidden",
+    footerActionText: "hidden",
+  },
+  layout: {
+    shimmer: false,
+    showOptionalFields: false,
   },
 } as const;
 

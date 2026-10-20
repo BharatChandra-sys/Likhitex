@@ -11,7 +11,7 @@
  * their writes with a 403, so an enabled button would only offer a dead end.
  */
 
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import {
   BookOpen,
   ChevronDown,
@@ -51,6 +51,58 @@ function iconFor(file: TreeFile) {
   if (!file.isText) return <ImageIcon className="w-[15px] h-[15px]" />;
   if (file.isLatex) return <FileCode2 className="w-[15px] h-[15px]" />;
   return <FileIcon className="w-[15px] h-[15px]" />;
+}
+
+const FORMAT_GUIDANCE: Record<string, { label: string; className: string; tip: string }> = {
+  ".png": {
+    label: "PNG",
+    className: "text-[9px] px-1 rounded bg-amber-100 text-amber-800 font-medium",
+    tip: "Slow in pdfLaTeX. Convert diagrams to PDF for 10x speedup.",
+  },
+  ".jpg": {
+    label: "JPG",
+    className: "text-[9px] px-1 rounded bg-emerald-100 text-emerald-800 font-medium",
+    tip: "Good for photos, compiles quickly.",
+  },
+  ".jpeg": {
+    label: "JPG",
+    className: "text-[9px] px-1 rounded bg-emerald-100 text-emerald-800 font-medium",
+    tip: "Good for photos, compiles quickly.",
+  },
+  ".pdf": {
+    label: "PDF",
+    className: "text-[9px] px-1 rounded bg-emerald-100 text-emerald-800 font-medium",
+    tip: "Best for diagrams. Fastest compilation.",
+  },
+  ".eps": {
+    label: "EPS",
+    className: "text-[9px] px-1 rounded bg-red-100 text-red-800 font-medium",
+    tip: "Not supported by pdfLaTeX. Convert to PDF first.",
+  },
+  ".gif": {
+    label: "GIF",
+    className: "text-[9px] px-1 rounded bg-amber-100 text-amber-800 font-medium",
+    tip: "Animated GIFs are not supported. Use a static format.",
+  },
+  ".svg": {
+    label: "SVG",
+    className: "text-[9px] px-1 rounded bg-amber-100 text-amber-800 font-medium",
+    tip: "Requires svg package. PDF is faster.",
+  },
+};
+
+function formatGuidanceBadge(file: TreeNode): React.ReactNode | null {
+  const guidance = file.kind === "file" ? FORMAT_GUIDANCE[file.extension] : null;
+  if (!guidance) return null;
+
+  return (
+    <span
+      title={guidance.tip}
+      className={guidance.className}
+    >
+      {guidance.label}
+    </span>
+  );
 }
 
 interface RowProps {
@@ -184,6 +236,7 @@ function Row({
       >
         <span className={isSelected ? "text-primary" : "text-outline"}>{iconFor(node)}</span>
         <span className="truncate">{node.name}</span>
+        {formatGuidanceBadge(node)}
         {isDirty && (
           <span
             className="w-1.5 h-1.5 rounded-full bg-tertiary shrink-0"
