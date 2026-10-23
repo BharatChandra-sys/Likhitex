@@ -47,7 +47,22 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           a client component so the API client can read the session token without
           any page having to pass it down by hand.
         */}
-        <ClerkProvider>
+        <ClerkProvider
+          appearance={{
+            layout: {
+              logoImageUrl: "/logo-feather.png",
+              socialButtonsVariant: "iconButton",
+            },
+            variables: {
+              colorPrimary: "#2563eb",
+              colorText: "#1e293b",
+            },
+            elements: {
+              rootBox: "font-sans",
+              card: "shadow-lg",
+            },
+          }}
+        >
           <ClerkTokenBridge />
           {children}
         </ClerkProvider>
