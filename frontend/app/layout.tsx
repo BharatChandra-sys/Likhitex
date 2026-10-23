@@ -49,7 +49,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         */}
         <ClerkProvider
           appearance={{
-            layout: {
+            options: {
               logoImageUrl: "/logo-feather.png",
               socialButtonsVariant: "iconButton",
             },
