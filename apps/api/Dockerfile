@@ -17,7 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # TeX Live for in-process compilation, plus curl for the health check.
 # texlive-fonts-extra adds ~1GB but is required: newtxtext.sty and other font
-# packages live there, and user documents depend on them.
+# packages live there, and user documents depend on them. texlive-binhex is
+# also needed because newtxtext.sty inputs binhex.tex.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         texlive-latex-base \
@@ -27,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         texlive-fonts-extra \
         texlive-science \
         texlive-bibtex-extra \
+        texlive-binhex \
         texlive-publishers \
         lmodern \
     && rm -rf /var/lib/apt/lists/* \
