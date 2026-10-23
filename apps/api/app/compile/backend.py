@@ -616,14 +616,17 @@ class DirectCompileBackend(CompileBackend):
                     logger.error(f"Log tail: {log_data[-1000:]}")
 
             # For empty documents, create a message
+            # Parse errors and warnings from log
+            parsed = parse_latex_log(log_data)
+            
             if no_pages and not pdf_data:
                 return CompileResult(
                     success=False,
                     pdf=None,
                     log=log_data[:2_000_000],
                     synctex=None,
-                    errors=[{"file": main_tex, "line": None, "message": "Document is empty - no content to render"}],
-                    warnings=[{"file": main_tex, "line": None, "message": "Add content between \\begin{document} and \\end{document}"}],
+                    errors=parsed["errors"] if parsed["errors"] else [{"file": main_tex, "line": 0, "message": "Document is empty - no content to render", "severity": "error"}],
+                    warnings=parsed["warnings"] if parsed["warnings"] else [{"file": main_tex, "line": 0, "message": "Add content between \\begin{document} and \\end{document}", "severity": "warning"}],
                     compile_time=compile_time,
                     error_type="empty_document",
                     error_message="Document compiled successfully but has no content to display",
@@ -634,8 +637,8 @@ class DirectCompileBackend(CompileBackend):
                 pdf=pdf_data,
                 log=log_data[:2_000_000],
                 synctex=synctex_data,
-                errors=[] if success else [{"file": main_tex, "line": None, "message": "Compilation failed"}],
-                warnings=[],
+                errors=parsed["errors"] if not success else [],
+                warnings=parsed["warnings"],
                 compile_time=compile_time,
                 error_type=None if success else "compile_error",
                 error_message=None if success else "LaTeX compilation failed",
