@@ -389,14 +389,21 @@ export default function EditorPage() {
           >
             <ArrowLeft className="w-[18px] h-[18px]" />
           </Link>
-          <Image
-            src="/logo.png"
-            alt="Likhitex"
-            width={120}
-            height={32}
-            priority
-            className="h-8 w-auto"
-          />
+          <Link
+            href="/"
+            className="flex items-center gap-2"
+            title="Home"
+            aria-label="Home"
+          >
+            <Image
+              src="/logo.png"
+              alt="Likhitex"
+              width={120}
+              height={32}
+              priority
+              className="h-8 w-auto"
+            />
+          </Link>
           <div className="h-4 w-[1px] bg-surface-container-high mx-1" />
           <h1 className="text-sm font-semibold text-on-surface truncate max-w-[220px]">
             {project?.name ?? "Project"}

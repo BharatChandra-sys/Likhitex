@@ -164,7 +164,9 @@ export default function SettingsPage() {
     <div className="min-h-screen bg-surface">
       <header className="h-14 bg-surface-container-lowest border-b border-surface-container-high sticky top-0 z-50">
         <div className="max-w-[1440px] mx-auto px-6 h-full flex items-center justify-between">
-          <Image src="/logo.png" alt="Likhitex" width={140} height={40} priority className="h-7 w-auto" />
+          <Link href="/" className="flex items-center gap-2">
+            <Image src="/logo.png" alt="Likhitex" width={140} height={40} priority className="h-7 w-auto" />
+          </Link>
 
           <div className="flex items-center gap-3">
             <Link href="/projects">

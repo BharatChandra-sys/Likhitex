@@ -369,7 +369,9 @@ export default async function LandingPage() {
       <footer className="border-t border-surface-container-high">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-9 sm:flex-row sm:items-start sm:justify-between lg:px-8">
           <div>
-            <Image src="/logo.png" alt="Likhitex" width={96} height={28} className="h-6 w-auto" />
+            <Link href="/" className="flex items-center gap-2">
+              <Image src="/logo.png" alt="Likhitex" width={96} height={28} className="h-6 w-auto" />
+            </Link>
             <p className="mt-2 text-[length:var(--step--1)] text-outline">
               Collaborative LaTeX for research groups.
             </p>

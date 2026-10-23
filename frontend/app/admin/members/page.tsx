@@ -127,13 +127,15 @@ export default function AdminMembersPage() {
       {/* Fixed Header */}
       <header className="fixed top-0 left-0 right-0 h-14 z-50 bg-white border-b border-neutral-200 flex items-center justify-between px-4 select-none">
         <div className="flex items-center gap-3 w-60">
-          <Image
-            src="/logo.png"
-            alt="Likhitex"
-            width={100}
-            height={32}
-            className="h-8 w-auto"
-          />
+          <Link href="/" className="flex items-center gap-2">
+            <Image
+              src="/logo.png"
+              alt="Likhitex"
+              width={100}
+              height={32}
+              className="h-8 w-auto"
+            />
+          </Link>
           <span className="text-sm font-semibold text-neutral-900">
             Likhitex
           </span>

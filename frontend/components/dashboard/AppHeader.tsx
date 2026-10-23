@@ -104,14 +104,16 @@ export default function AppHeader({
   return (
     <header className="fixed top-0 left-0 right-0 h-14 z-50 bg-surface-container-lowest border-b border-[#E5E7EB] flex items-center justify-between px-4 select-none">
       <div className="flex items-center gap-3 w-[240px]">
-        <Image
-          src="/logo.png"
-          alt="Likhitex"
-          width={140}
-          height={40}
-          priority
-          className="h-8 w-auto"
-        />
+        <Link href="/" className="flex items-center gap-2">
+          <Image
+            src="/logo.png"
+            alt="Likhitex"
+            width={140}
+            height={40}
+            priority
+            className="h-8 w-auto"
+          />
+        </Link>
       </div>
 
       {/* Center Search */}
