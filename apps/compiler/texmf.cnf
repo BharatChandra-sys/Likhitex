@@ -18,7 +18,6 @@
 % those constructs statically, so a mistake in any one of the three layers
 % still leaves two.
 shell_escape = f
-shell_escape_commands =
 
 % TeX's dynamic package/mktex machinery can download and run code.
 MKTEXTEX = 0
@@ -26,10 +25,6 @@ MKTEXPK = 0
 MKTEXMF = 0
 MKTEXTFM = 0
 MKTEXFMT = 0
-TEXMFSCRIPTS =
-
-% No network lookups of any kind.
-TEXMFNET =
 
 % --- File access ---------------------------------------------------------
 

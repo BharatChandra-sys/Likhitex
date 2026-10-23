@@ -49,7 +49,7 @@ USER appuser
 
 # Fail the build rather than ship an image whose every compile fails.
 RUN cd /tmp \
-    && printf '%s\n' '\documentclass{article}' '\usepackage{amsmath,graphicx,hyperref,geometry}' \
+    && printf '%s\n' '\documentclass{article}' '\usepackage{amsmath,graphicx,hyperref,geometry,microtype}' \
         '\begin{document}' 'build check $E=mc^2$' '\end{document}' > check.tex \
     && pdflatex -no-shell-escape -interaction=nonstopmode check.tex > /dev/null \
     && test -s check.pdf \
