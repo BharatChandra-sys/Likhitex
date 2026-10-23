@@ -16,15 +16,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
 # TeX Live for in-process compilation, plus curl for the health check.
-# texlive-fonts-extra is left out: it adds ~1GB for rarely used fonts.
+# texlive-fonts-extra adds ~1GB but is required: newtxtext.sty and other font
+# packages live there, and user documents depend on them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         texlive-latex-base \
         texlive-latex-recommended \
         texlive-latex-extra \
         texlive-fonts-recommended \
+        texlive-fonts-extra \
         texlive-science \
         texlive-bibtex-extra \
+        texlive-publishers \
         lmodern \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/share/doc/texlive* /usr/share/texlive/texmf-dist/doc
