@@ -55,7 +55,6 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             },
             variables: {
               colorPrimary: "#2563eb",
-              colorText: "#1e293b",
             },
             elements: {
               rootBox: "font-sans",
