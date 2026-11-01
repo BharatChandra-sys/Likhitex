@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="32" fill="#2563eb"/>
+  
+  <!-- Stylized "L" and pen/document icon -->
+  <g fill="white">
+    <!-- Large L -->
+    <path d="M 18 16 L 18 48 L 32 48 L 32 44 L 22 44 L 22 16 Z" fill="white"/>
+    
+    <!-- Slanted lines representing text/LaTeX -->
+    <line x1="36" y1="20" x2="48" y2="20" stroke="white" stroke-width="2"/>
+    <line x1="36" y1="26" x2="46" y2="26" stroke="white" stroke-width="2"/>
+    <line x1="36" y1="32" x2="50" y2="32" stroke="white" stroke-width="2"/>
+    <line x1="36" y1="38" x2="44" y2="38" stroke="white" stroke-width="2"/>
+    
+    <!-- Small pen nib at bottom right -->
+    <path d="M 48 42 L 52 46 L 50 48 L 46 44 Z" fill="#fbbf24"/>
+  </g>
+</svg>

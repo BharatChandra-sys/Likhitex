@@ -7,23 +7,48 @@ Parses pdflatex/xelatex log output to extract structured diagnostics.
 import re
 from typing import Any
 
+# The compile commands pass -file-line-error, which replaces TeX's "! message"
+# with "./path/file.tex:12: message".
+_FILE_LINE_ERROR_RE = re.compile(r"^(?:\./)?(\S+?\.\w+):(\d+): (.+)$")
+_ERROR_PREFIX_RE = re.compile(r"^(?:LaTeX Error: |Package (\w+) Error: )")
+
+
+def _clean_error_message(message: str) -> str:
+    """Drop TeX's "LaTeX Error:" prefix; keep a package's name as a tag."""
+    match = _ERROR_PREFIX_RE.match(message)
+    if not match:
+        return message
+    rest = message[match.end():]
+    return f"[{match.group(1)}] {rest}" if match.group(1) else rest
+
 
 def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
     """
     Parse LaTeX log output to extract errors and warnings.
-    
+
     Returns a dict with 'errors' and 'warnings' keys, each containing a list
     of diagnostics with 'file', 'line', 'message', and 'severity' fields.
     """
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
-    
+
     lines = log.split("\n")
     i = 0
-    
+
     while i < len(lines):
-        line = lines[i]
-        
+        line = lines[i].rstrip("\r")
+
+        located = _FILE_LINE_ERROR_RE.match(line)
+        if located:
+            errors.append({
+                "file": located.group(1),
+                "line": int(located.group(2)),
+                "message": _clean_error_message(located.group(3).strip()),
+                "severity": "error"
+            })
+            i += 1
+            continue
+
         # Match LaTeX errors: "! LaTeX Error:"
         if line.startswith("! LaTeX Error:"):
             message = line[len("! LaTeX Error:"):].strip()
@@ -36,7 +61,7 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
             })
             i += 1
             continue
-        
+
         # Match general errors: "! "
         if line.startswith("! "):
             message = line[2:].strip()
@@ -53,9 +78,9 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
             })
             i += 1
             continue
-        
+
         # Match file not found errors
-        if "cannot \read from terminal" in line.lower() or "file not found" in line.lower():
+        if r"cannot \read from terminal" in line.lower() or "file not found" in line.lower():
             file, line_num = _extract_location(lines, i)
             errors.append({
                 "file": file or "",
@@ -65,7 +90,7 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
             })
             i += 1
             continue
-        
+
         # Match package errors
         pkg_error_match = re.match(r"^! Package (\w+) Error: (.+)$", line)
         if pkg_error_match:
@@ -79,7 +104,7 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
             })
             i += 1
             continue
-        
+
         # Match warnings
         if line.startswith("LaTeX Warning:"):
             message = line[len("LaTeX Warning:"):].strip()
@@ -92,7 +117,7 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
             })
             i += 1
             continue
-        
+
         # Match package warnings
         pkg_warn_match = re.match(r"^Package (\w+) Warning: (.+)$", line)
         if pkg_warn_match:
@@ -106,7 +131,7 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
             })
             i += 1
             continue
-        
+
         # Match Underfull/Overfull hbox (common but usually low-priority)
         if line.startswith("Underfull \\hbox") or line.startswith("Overfull \\hbox"):
             # Extract line number if present
@@ -124,22 +149,22 @@ def parse_latex_log(log: str) -> dict[str, list[dict[str, Any]]]:
                     })
             i += 1
             continue
-        
+
         i += 1
-    
+
     return {"errors": errors, "warnings": warnings}
 
 
 def _extract_location(lines: list[str], start_idx: int) -> tuple[str, int]:
     """
     Extract file and line number from surrounding log context.
-    
+
     LaTeX logs typically show the file in parentheses like (./main.tex)
     and line numbers in subsequent lines like "l.42 \\end{document}".
     """
     file = ""
     line_num = 0
-    
+
     # Look backwards for file context (up to 10 lines)
     for i in range(max(0, start_idx - 10), start_idx):
         line = lines[i]
@@ -147,7 +172,7 @@ def _extract_location(lines: list[str], start_idx: int) -> tuple[str, int]:
         file_match = re.search(r'\(\./([\w/\-_.]+\.tex)', line)
         if file_match:
             file = file_match.group(1)
-    
+
     # Look forward for line number (up to 5 lines)
     for i in range(start_idx, min(len(lines), start_idx + 5)):
         line = lines[i]
@@ -161,5 +186,5 @@ def _extract_location(lines: list[str], start_idx: int) -> tuple[str, int]:
         if input_line_match:
             line_num = int(input_line_match.group(1))
             break
-    
+
     return file, line_num

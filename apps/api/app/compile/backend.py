@@ -9,12 +9,16 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import re
 import subprocess
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from app.compile.log_parser import parse_latex_log
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -47,13 +51,16 @@ class CompileBackend(ABC):
     """Abstract interface for LaTeX compilation."""
 
     @abstractmethod
-    async def compile(self, files: FileMap, draft_mode: bool = False) -> CompileResult:
+    async def compile(
+        self, files: FileMap, draft_mode: bool = False, main: str | None = None
+    ) -> CompileResult:
         """
         Compile a LaTeX project.
 
         Args:
             files: Mapping of file path to content (str for text, bytes for binary).
             draft_mode: If True, compile in draft mode (skip images, faster compilation).
+            main: Requested root document; auto-detected when None.
 
         Returns:
             A CompileResult. Compilation failure is reported in the result, not
@@ -103,6 +110,7 @@ class LocalCompileBackend(CompileBackend):
         return [
             "docker",
             "run",
+            *(["--runtime", settings.COMPILE_DOCKER_RUNTIME] if settings.COMPILE_DOCKER_RUNTIME else []),
             "--rm",
             "-i",
             # No network egress: \write18, \input|curl and package fetches fail.
@@ -128,11 +136,14 @@ class LocalCompileBackend(CompileBackend):
             self.image,
         ]
 
-    async def compile(self, files: FileMap, draft_mode: bool = False) -> CompileResult:
+    async def compile(
+        self, files: FileMap, draft_mode: bool = False, main: str | None = None
+    ) -> CompileResult:
         """Compile in a sandboxed container."""
         payload = json.dumps({
             "files": _encode_files(files),
-            "draft_mode": draft_mode
+            "draft_mode": draft_mode,
+            "main": main,
         }).encode("utf-8")
 
         logger.info("Starting local compile of %d file(s)", len(files))
@@ -332,7 +343,9 @@ class RemoteCompileBackend(CompileBackend):
             self.api_key.encode("utf-8"), message, hashlib.sha256
         ).hexdigest()
 
-    async def compile(self, files: FileMap, draft_mode: bool = False) -> CompileResult:
+    async def compile(
+        self, files: FileMap, draft_mode: bool = False, main: str | None = None
+    ) -> CompileResult:
         """Compile via the remote service."""
         import time
 
@@ -345,7 +358,8 @@ class RemoteCompileBackend(CompileBackend):
 
         body = json.dumps({
             "files": _encode_files(files),
-            "draft_mode": draft_mode
+            "draft_mode": draft_mode,
+            "main": main,
         }).encode("utf-8")
         timestamp = str(int(time.time()))
         headers = {
@@ -432,247 +446,364 @@ def _direct_tex_env(workdir: str) -> dict[str, str]:
     }
 
 
+ENGINES = ("pdflatex", "xelatex", "lualatex")
+
+# Cap on what a direct compile hands back, so one document cannot balloon the
+# API's memory or the JSON response (base64 adds a third on top).
+MAX_PDF_BYTES = 32 * 1024 * 1024
+MAX_LOG_CHARS = 2_000_000
+MAX_DIAGNOSTICS = 200
+# First pass, one after BibTeX, and up to two to settle references. latexmk
+# allows five; on 0.1 CPU every pass is several seconds of the timeout.
+MAX_TEX_PASSES = 4
+
+_COMMENT_RE = re.compile(r"(?<!\\)%.*$", re.MULTILINE)
+_DOCUMENTCLASS_RE = re.compile(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{")
+# TeXShop/TeXstudio/Overleaf magic comment: % !TEX program = xelatex
+_MAGIC_ENGINE_RE = re.compile(
+    r"^\s*%\s*!\s*TEX\s+(?:TS-)?program\s*=\s*([A-Za-z]+)", re.IGNORECASE | re.MULTILINE
+)
+# Packages that only work on a Unicode engine.
+_UNICODE_PACKAGE_RE = re.compile(
+    r"\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{[^}]*"
+    r"(?<![\w-])(?:fontspec|unicode-math|polyglossia)(?![\w-])"
+)
+# Messages LaTeX, hyperref (rerunfilecheck), longtable and biblatex print when
+# another pass would change the output.
+_RERUN_RE = re.compile(r"Rerun to get|Label\(s\) may have changed|Please rerun|Rerun LaTeX")
+_BIBER_RE = re.compile(r"Please \(re\)run Biber")
+# Files whose change between passes means page references are not settled.
+# The kernel prints no rerun warning for a new table of contents.
+_LIST_SUFFIXES = (".toc", ".lof", ".lot")
+
+
+def _strip_comments(source: str) -> str:
+    return _COMMENT_RE.sub("", source)
+
+
+def choose_main_file(files: FileMap, requested: str | None = None) -> str | None:
+    """
+    Pick the document to compile.
+
+    An explicit request wins when it names a .tex file in the job. Otherwise the
+    root is a .tex file that declares \\documentclass (chapters do not), with
+    main.tex, then the shallowest path, preferred, so the choice is stable.
+    """
+    sources = {
+        path: content
+        for path, content in files.items()
+        if path.endswith(".tex") and isinstance(content, str)
+    }
+    if requested in sources:
+        return requested
+    roots = [path for path, text in sources.items() if _DOCUMENTCLASS_RE.search(_strip_comments(text))]
+    candidates = roots or list(sources)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda p: (p.rsplit("/", 1)[-1] != "main.tex", p.count("/"), p))
+
+
+def detect_engine(files: FileMap, main: str) -> str:
+    """
+    Choose the TeX engine.
+
+    A `% !TEX program = ...` comment in the main file wins; otherwise packages
+    that need a Unicode engine (fontspec, unicode-math, polyglossia) select
+    XeLaTeX; everything else uses pdfLaTeX.
+    """
+    main_source = files.get(main)
+    if isinstance(main_source, str):
+        magic = _MAGIC_ENGINE_RE.search(main_source[:4096])
+        if magic and magic.group(1).lower() in ENGINES:
+            return magic.group(1).lower()
+
+    for path, content in files.items():
+        if isinstance(content, str) and path.endswith((".tex", ".sty", ".cls")):
+            if _UNICODE_PACKAGE_RE.search(_strip_comments(content)):
+                return "xelatex"
+    return "pdflatex"
+
+
+def _draft_source(source: str) -> str:
+    """
+    Load graphics in draft mode: images become labelled boxes and are never
+    embedded. Prepended without a newline so log and SyncTeX lines still match
+    the editor. This is what Overleaf's draft mode injects.
+    """
+    return "\\PassOptionsToPackage{draft}{graphicx}\\PassOptionsToPackage{draft}{graphics}" + source
+
+
+class ToolMissing(Exception):
+    """A TeX tool is not installed on this host."""
+
+
+def _kill_tree(process: "subprocess.Popen[bytes]") -> None:
+    """Kill a timed-out tool and everything it started, then reap it."""
+    if sys.platform != "win32":
+        import signal
+
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        logger.error("Compile process %s did not exit after kill", process.pid)
+
+
+def _run_tool(argv: list[str], cwd: str, env: dict[str, str], timeout: float) -> int:
+    """
+    Run one TeX tool to completion and return its exit code.
+
+    Output goes to a dotfile in the job directory rather than a pipe, so a
+    document printing without end costs disk in a throwaway directory instead
+    of API memory, and paranoid mode stops TeX from reading it back.
+
+    Raises:
+        subprocess.TimeoutExpired: the tool overran; it has been killed.
+        ToolMissing: the tool is not installed.
+    """
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired(argv, 0)
+    with open(os.path.join(cwd, ".output"), "ab") as output:
+        try:
+            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                argv,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                # Own process group, so a timeout kills the whole tree.
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise ToolMissing(argv[0]) from exc
+        try:
+            return process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(process)
+            raise
+
+
+def _read_tail(path: Path, limit: int = MAX_LOG_CHARS) -> str:
+    """Read at most `limit` bytes from the end of a text file."""
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - limit))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _list_snapshot(workdir: Path, stem: str) -> dict[str, bytes]:
+    """Contents of the ToC/LoF/LoT files, to detect page numbers moving."""
+    snapshot: dict[str, bytes] = {}
+    for suffix in _LIST_SUFFIXES:
+        candidate = workdir / f"{stem}{suffix}"
+        if candidate.is_file():
+            snapshot[suffix] = candidate.read_bytes()
+    return snapshot
+
+
+def _needs_bibtex(workdir: Path, stem: str) -> bool:
+    """True when the document cites something and names a .bib database."""
+    aux = _read_tail(workdir / f"{stem}.aux")
+    if "\\bibdata{" not in aux:
+        return False
+    return any(
+        "\\citation{" in _read_tail(path) for path in workdir.rglob("*.aux")
+    )
+
+
 class DirectCompileBackend(CompileBackend):
     """
-    Direct subprocess compilation (no Docker).
+    Compile with TeX Live inside the API process's container (no Docker).
 
-    Simpler approach for local development. Runs pdflatex directly in a temp directory.
-    Security is reduced but sufficient for trusted local development.
+    Used on the Render free tier. Every job runs in a fresh temp directory with
+    a scrubbed environment, paranoid kpathsea file access and shell escape off
+    (see `_direct_tex_env`). Passes are driven by the log, as latexmk does:
+    a second run only happens when LaTeX asks for one, and BibTeX only runs when
+    the document cites a .bib database.
     """
 
     def __init__(self, timeout: int | None = None) -> None:
         self.timeout = timeout or settings.COMPILE_TIMEOUT_SECONDS
 
-    async def compile(self, files: FileMap, draft_mode: bool = False) -> CompileResult:
-        """Compile directly using subprocess."""
+    async def compile(
+        self, files: FileMap, draft_mode: bool = False, main: str | None = None
+    ) -> CompileResult:
+        """Compile in a worker thread so the event loop stays responsive."""
+        return await asyncio.to_thread(self._compile_sync, files, draft_mode, main)
+
+    def _compile_sync(self, files: FileMap, draft_mode: bool, requested_main: str | None) -> CompileResult:
         import shutil
         import tempfile
         import time
-        from pathlib import Path
 
-        start_time = time.time()
+        start = time.monotonic()
+        deadline = start + self.timeout
 
-        # Create temp directory
+        main = choose_main_file(files, requested_main)
+        if main is None:
+            return LocalCompileBackend._failure("no_tex_file", "No .tex file found in project")
+        engine = detect_engine(files, main)
+        stem = Path(main).stem
+
         tmpdir = tempfile.mkdtemp(prefix="likhitex_")
-        tmppath = Path(tmpdir)
-
+        workdir = Path(tmpdir)
         try:
-            # Write all files to temp directory
-            for filepath, content in files.items():
-                filepath = filepath.lstrip("/\\")  # Remove leading slashes
-                full_path = tmppath / filepath
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-
+            root = workdir.resolve()
+            for raw_path, content in files.items():
+                target = (workdir / raw_path.lstrip("/\\")).resolve()
+                if root not in target.parents:
+                    # Routes validate paths already; this is the last line.
+                    return LocalCompileBackend._failure("invalid_path", f"Invalid file path: {raw_path}")
+                target.parent.mkdir(parents=True, exist_ok=True)
                 if isinstance(content, bytes):
-                    full_path.write_bytes(content)
+                    target.write_bytes(content)
                 else:
-                    full_path.write_text(content, encoding="utf-8")
+                    text = _draft_source(content) if draft_mode and raw_path == main else content
+                    target.write_text(text, encoding="utf-8")
 
-            # Find main .tex file
-            main_tex = None
-            for filepath in files.keys():
-                if filepath.endswith(".tex"):
-                    main_tex = filepath.lstrip("/\\")
-                    break
-
-            if not main_tex:
-                return CompileResult(
-                    success=False,
-                    pdf=None,
-                    log="No .tex file found in project",
-                    synctex=None,
-                    errors=[{"file": None, "line": None, "message": "No .tex file found"}],
-                    warnings=[],
-                    compile_time=0.0,
-                    error_type="no_tex_file",
-                    error_message="No .tex file found in project",
-                )
-
-            # Run pdflatex
-            # Note: Run twice for proper references/cross-refs
-            cmd = [
-                "pdflatex",
+            env = _direct_tex_env(tmpdir)
+            tex_argv = [
+                engine,
                 "-no-shell-escape",
                 "-interaction=nonstopmode",
                 "-file-line-error",
-                "-synctex=1",  # Generate SyncTeX data for PDF<->source navigation
+                "-synctex=1",
                 "-output-directory=.",
-                main_tex,
+                *(["--nosocket"] if engine == "lualatex" else []),
+                main,
             ]
-            tex_env = _direct_tex_env(tmpdir)
+            log_path = workdir / f"{stem}.log"
+            pdf_path = workdir / f"{stem}.pdf"
 
-            logger.info(f"Running pdflatex on {main_tex} in {tmpdir}")
-
-            # Run in thread to avoid blocking
-            def run_compile() -> tuple[bytes | None, bytes, int | None]:
+            passes = 0
+            pdf: bytes | None = None
+            out_of_time = False
+            bibtex_ran = False
+            notes: list[dict[str, Any]] = []
+            while True:
+                before = _list_snapshot(workdir, stem)
                 try:
-                    # First pass
-                    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                        cmd,
-                        cwd=tmpdir,
-                        env=tex_env,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        stdin=subprocess.PIPE,  # Provide stdin to prevent hanging
-                    )
-                    stdout1, stderr1 = proc.communicate(input=b"", timeout=self.timeout)
-
-                    # Wait a moment for file handles to be released
-                    time.sleep(0.1)
-
-                    # If first pass succeeded, run second pass
-                    if proc.returncode == 0:
-                        proc2 = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                            cmd,
-                            cwd=tmpdir,
-                            env=tex_env,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            stdin=subprocess.PIPE,
-                        )
-                        stdout2, stderr2 = proc2.communicate(input=b"", timeout=self.timeout)
-
-                        # Wait for file handles to be released
-                        time.sleep(0.1)
-
-                        return stdout2, stderr2, proc2.returncode
-
-                    return stdout1, stderr1, proc.returncode
+                    _run_tool(tex_argv, tmpdir, env, deadline - time.monotonic())
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    return None, b"Compilation timed out", -1
-                except FileNotFoundError:
-                    return None, b"pdflatex not found", -2
+                    # A killed pass leaves a truncated PDF on disk, so fall back
+                    # to the one read after the last completed pass.
+                    if pdf is None:
+                        raise
+                    out_of_time = True
+                    break
+                passes += 1
+                # The exit code is not the verdict: pdfTeX exits 1 for any
+                # recoverable error (an undefined macro, a missing image) and
+                # still writes a usable PDF. Only a missing PDF is a failure.
+                pdf = pdf_path.read_bytes() if pdf_path.is_file() else None
+                if pdf is None or passes >= MAX_TEX_PASSES:
+                    break
+                if not bibtex_ran and _needs_bibtex(workdir, stem):
+                    try:
+                        _run_tool(["bibtex", stem], tmpdir, env, deadline - time.monotonic())
+                    except subprocess.TimeoutExpired:
+                        out_of_time = True
+                        break
+                    bibtex_ran = True
+                    continue
+                log_text = _read_tail(log_path)
+                if _RERUN_RE.search(log_text) or _list_snapshot(workdir, stem) != before:
+                    continue
+                break
 
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_compile)
-                stdout, stderr, returncode = future.result(timeout=self.timeout + 5)
+            log_text = _read_tail(log_path) or _read_tail(workdir / ".output")
+            if bibtex_ran:
+                blg = _read_tail(workdir / f"{stem}.blg", 100_000)
+                if "error message" in blg:
+                    log_text = f"{log_text}\n\n=== BibTeX ===\n{blg}"
+            if _BIBER_RE.search(log_text):
+                notes.append({
+                    "file": main,
+                    "line": 0,
+                    "message": "Biber is not available; use \\usepackage[backend=bibtex]{biblatex}",
+                    "severity": "warning",
+                })
 
-            compile_time = time.time() - start_time
+            if out_of_time:
+                notes.append({
+                    "file": main,
+                    "line": 0,
+                    "message": "Ran out of compile time: references or citations may be out of date",
+                    "severity": "warning",
+                })
+            if pdf is not None and len(pdf) > MAX_PDF_BYTES:
+                return LocalCompileBackend._failure("output_too_large", "Generated PDF exceeds the size limit")
+            synctex_path = workdir / f"{stem}.synctex.gz"
+            # SyncTeX from a killed pass would not match the PDF being returned.
+            synctex = synctex_path.read_bytes() if synctex_path.is_file() and not out_of_time else None
 
-            if returncode == -2:
+            compile_time = time.monotonic() - start
+            parsed = parse_latex_log(log_text)
+            errors = parsed["errors"][:MAX_DIAGNOSTICS]
+            warnings = notes + parsed["warnings"][:MAX_DIAGNOSTICS]
+            extra = {"engine": engine, "main": main, "passes": passes}
+
+            if pdf is None and "No pages of output" in log_text:
                 return CompileResult(
                     success=False,
                     pdf=None,
-                    log="pdflatex not found. Please install TeX Live or MiKTeX.",
+                    log=log_text,
                     synctex=None,
-                    errors=[{"file": None, "line": None, "message": "pdflatex not found"}],
-                    warnings=[],
-                    compile_time=compile_time,
-                    error_type="pdflatex_not_found",
-                    error_message="pdflatex not found. Please install TeX Live or MiKTeX.",
-                )
-
-            if returncode == -1:
-                return CompileResult(
-                    success=False,
-                    pdf=None,
-                    log="Compilation timed out",
-                    synctex=None,
-                    errors=[],
-                    warnings=[],
-                    compile_time=self.timeout,
-                    error_type="timeout",
-                    error_message=f"Compilation exceeded {self.timeout}s timeout",
-                )
-
-            # Read output files
-            pdf_file = tmppath / main_tex.replace(".tex", ".pdf")
-            log_file = tmppath / main_tex.replace(".tex", ".log")
-            synctex_file = tmppath / main_tex.replace(".tex", ".synctex.gz")
-
-            pdf_data = None
-            if pdf_file.exists():
-                pdf_data = pdf_file.read_bytes()
-
-            # Read SyncTeX file if present (for future PDF<->source sync)
-            synctex_data = None
-            if synctex_file.exists():
-                synctex_data = synctex_file.read_bytes()
-
-            log_data = ""
-            if log_file.exists():
-                log_data = log_file.read_text(encoding="utf-8", errors="replace")
-            elif stdout:
-                log_data = stdout.decode("utf-8", errors="replace")
-
-            # Add stderr to log if present
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    log_data = f"{log_data}\n\n=== STDERR ===\n{stderr_text}"
-
-            # Check for "No pages of output" which means empty document
-            no_pages = "No pages of output" in log_data
-
-            success = returncode == 0 and (pdf_data is not None or no_pages)
-
-            # Log the error for debugging
-            if not success:
-                logger.error(f"Compilation failed: returncode={returncode}, pdf_exists={pdf_file.exists()}")
-                if log_data:
-                    # Show last 1000 chars which usually has the error
-                    logger.error(f"Log tail: {log_data[-1000:]}")
-
-            # For empty documents, create a message
-            # Parse errors and warnings from log
-            parsed = parse_latex_log(log_data)
-            
-            if no_pages and not pdf_data:
-                return CompileResult(
-                    success=False,
-                    pdf=None,
-                    log=log_data[:2_000_000],
-                    synctex=None,
-                    errors=parsed["errors"] if parsed["errors"] else [{"file": main_tex, "line": 0, "message": "Document is empty - no content to render", "severity": "error"}],
-                    warnings=parsed["warnings"] if parsed["warnings"] else [{"file": main_tex, "line": 0, "message": "Add content between \\begin{document} and \\end{document}", "severity": "warning"}],
+                    errors=errors or [{"file": main, "line": 0, "message": "Document is empty - no content to render", "severity": "error"}],
+                    warnings=warnings or [{"file": main, "line": 0, "message": "Add content between \\begin{document} and \\end{document}", "severity": "warning"}],
                     compile_time=compile_time,
                     error_type="empty_document",
                     error_message="Document compiled successfully but has no content to display",
+                    extra=extra,
                 )
 
+            success = pdf is not None
+            if not success:
+                logger.info("Direct compile produced no PDF: engine=%s passes=%s", engine, passes)
             return CompileResult(
                 success=success,
-                pdf=pdf_data,
-                log=log_data[:2_000_000],
-                synctex=synctex_data,
-                errors=parsed["errors"] if not success else [],
-                warnings=parsed["warnings"],
+                pdf=pdf,
+                log=log_text,
+                synctex=synctex,
+                errors=errors,
+                warnings=warnings,
                 compile_time=compile_time,
                 error_type=None if success else "compile_error",
                 error_message=None if success else "LaTeX compilation failed",
+                extra=extra,
             )
 
+        except subprocess.TimeoutExpired:
+            result = LocalCompileBackend._failure(
+                "timeout", f"Compilation exceeded {self.timeout}s timeout"
+            )
+            result.compile_time = float(self.timeout)
+            return result
+        except ToolMissing as exc:
+            tool = str(exc)
+            logger.error("%s is not installed", tool)
+            hint = " (remove the % !TEX program comment or fontspec to use pdflatex)"
+            return LocalCompileBackend._failure(
+                "engine_not_available",
+                f"{tool} is not installed on this server{hint if tool != 'pdflatex' and tool == engine else ''}",
+            )
         except Exception as exc:
-            logger.error(f"Compile error: {exc}", exc_info=True)
-            return CompileResult(
-                success=False,
-                pdf=None,
-                log=str(exc),
-                synctex=None,
-                errors=[{"file": None, "line": None, "message": str(exc)}],
-                warnings=[],
-                compile_time=time.time() - start_time,
-                error_type="internal_error",
-                error_message=str(exc),
-            )
+            # The message can hold host paths; keep it in the server log.
+            logger.error("Direct compile error: %s", exc, exc_info=True)
+            return LocalCompileBackend._failure("internal_error", "Compilation system failure")
         finally:
-            # Clean up temp directory with retry for Windows file locking
-            # Wait a bit for file handles to be fully released
-            time.sleep(0.2)
-
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(tmpdir, ignore_errors=False)
-                    break
-                except (PermissionError, OSError) as e:
-                    if attempt < 2:
-                        time.sleep(0.5)
-                    else:
-                        # Last resort: try with ignore_errors
-                        logger.warning(f"Could not fully delete {tmpdir}: {e}")
-                        shutil.rmtree(tmpdir, ignore_errors=True)
+            # ignore_errors: Windows can briefly hold handles on TeX outputs, and
+            # a leftover temp dir must not turn a good compile into a failure.
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def get_compile_backend(backend_type: str | None = None) -> CompileBackend:

@@ -8,28 +8,20 @@
  * path->text map). A buffer is therefore the source of truth for what will be
  * compiled, and saves push it to the API in the background.
  *
- * Two rules shape the code:
+ * Three rules shape the code:
  * - Compiling uses unsaved buffers, so the PDF always matches what is on screen.
  * - Writes are debounced per file, and selecting another file flushes the
  *   outgoing one first, so switching tabs can never lose an edit.
+ * - Each file's text is fetched at most once. File ids come from the list
+ *   already in memory, and mutations patch that list from their own responses,
+ *   so neither a save nor a compile re-lists the project.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { api, ApiError } from "@/lib/api/client";
-import type {
-  CompileResponse,
-  Diagnostic,
-  FileResponse,
-  ProjectDetailResponse,
-  Role,
-} from "@/lib/api/types";
-import {
-  buildFileTree,
-  isTextPath,
-  pickInitialFile,
-  type TreeDir,
-} from "@/lib/fileTree";
+import type { CompileResponse, FileResponse, ProjectDetailResponse, Role } from "@/lib/api/types";
+import { buildFileTree, isTextPath, pickInitialFile, type TreeDir } from "@/lib/fileTree";
 
 /** How long after the last keystroke a buffer is written to the API. */
 export const AUTOSAVE_DELAY_MS = 1200;
@@ -59,15 +51,10 @@ export interface UseEditorProjectResult {
   selectedPath: string | null;
   /** Current buffer text. Empty string when no text file is open. */
   content: string;
-  /**
-   * Buffer text for any file in the project, loaded or not.
-   *
-   * `undefined` means the file has not been fetched yet. Compilation needs every
-   * file's text, so it reads through this rather than the single open buffer.
-   */
-  contentsFor: (path: string) => string | undefined;
-  /** Ensures every text file's content is loaded, then returns it. */
-  loadAllContents: () => Promise<Record<string, string>>;
+  /** True while the selected text file's content is still being fetched. */
+  isFileLoading: boolean;
+  /** Every buffer loaded so far, keyed by path; read lazily, e.g. for completion. */
+  getBuffers: () => Readonly<Record<string, string>>;
   isLoading: boolean;
   loadError: ApiError | null;
 
@@ -75,6 +62,7 @@ export interface UseEditorProjectResult {
   canEdit: boolean;
   /** True when the user is only a VIEWER, so writes must be hidden, not just disabled. */
   isReadOnly: boolean;
+  role: Role | null;
 
   saveState: SaveState;
   saveError: string | null;
@@ -95,18 +83,7 @@ export interface UseEditorProjectResult {
   /** When true, the next compile skips images for speed. */
   draftMode: boolean;
   setDraftMode: (draft: boolean) => void;
-  /**
-   * Runs a compile, recording the result.
-   *
-   * Returns the response so a caller can react to a specific outcome; the editor
-   * itself ignores it, which is why the public type stays `Promise<void>`.
-   */
   compileNow: () => Promise<void>;
-  /** As `compileNow`, but resolves with the compile response. */
-  compileAndReport: () => Promise<CompileResponse | null>;
-
-  /** Reloads the file list from the API, e.g. after an external change. */
-  refreshFiles: () => Promise<void>;
 }
 
 function toEditorFile(file: FileResponse): EditorFile {
@@ -131,9 +108,27 @@ export function effectiveRole(
   return membership ? membership.role : null;
 }
 
-export function useEditorProject(projectId: string, userId: string | null): UseEditorProjectResult {
+const storageKey = (projectId: string) => `compile_result_${projectId}`;
+
+/** The last compile, so a reload shows the PDF instead of an empty pane. */
+function readStoredCompile(projectId: string): CompileResponse | null {
+  if (typeof window === "undefined" || !projectId) return null;
+  try {
+    const stored = localStorage.getItem(storageKey(projectId));
+    return stored ? (JSON.parse(stored) as CompileResponse) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function useEditorProject(
+  projectId: string,
+  /** File to open first, e.g. from a `?file=` deep link; ignored if absent. */
+  preferredPath: string | null = null,
+): UseEditorProjectResult {
   const { isLoaded: clerkLoaded, isSignedIn } = useAuth();
   const [project, setProject] = useState<ProjectDetailResponse | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [files, setFiles] = useState<EditorFile[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [contents, setContents] = useState<Record<string, string>>({});
@@ -143,25 +138,15 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<ApiError | null>(null);
   const [isCompiling, setIsCompiling] = useState(false);
-  const [compileResult, setCompileResult] = useState<CompileResponse | null>(null);
+  const [compileResult, setCompileResult] = useState(() => readStoredCompile(projectId));
   const [compileError, setCompileError] = useState<string | null>(null);
   const [draftMode, setDraftMode] = useState(false);
 
-  // Load last compile result from localStorage on mount
-  useEffect(() => {
-    if (!projectId) return;
-    try {
-      const stored = localStorage.getItem(`compile_result_${projectId}`);
-      if (stored) {
-        const parsed = JSON.parse(stored) as CompileResponse;
-        setCompileResult(parsed);
-      }
-    } catch (err) {
-      console.warn("Failed to load stored compile result:", err);
-    }
-  }, [projectId]);
-
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  /** In-flight content fetches, so a compile and a selection never fetch twice. */
+  const inflight = useRef(new Map<string, Promise<string>>());
+  /** Guards against overlapping compiles without re-creating the callback. */
+  const compiling = useRef(false);
 
   /**
    * Latest state, for async callbacks that must not be re-created per keystroke.
@@ -190,25 +175,21 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   const canEdit = role === "editor" || role === "owner";
   const isReadOnly = role === "viewer";
 
-  /** Loads the file list and pushes it into state. */
-  const loadFileList = useCallback(async () => {
-    const response = await api.listFiles(projectId);
-    const next = response.files.map(toEditorFile);
-    setFiles(next);
-    return next;
-  }, [projectId]);
-
   /**
    * Maps a path to its file id.
    *
-   * The single-file endpoints address files by UUID, but the rest of the editor
-   * works in paths, and `FileResponse` carries both. Rather than keep a second
-   * id-keyed map in sync with the tree, the path is resolved on demand.
+   * The single-file endpoints address files by UUID while the editor works in
+   * paths. The list in memory answers this; the API is asked only for a path it
+   * does not know, e.g. one added by a collaborator since the page loaded.
    */
   const fileIdFor = useCallback(
     async (path: string): Promise<string> => {
-      const detail = await api.listFiles(projectId);
-      const match = detail.files.find((f) => f.path === path);
+      const known = latest.current.files.find((f) => f.path === path);
+      if (known) return known.id;
+
+      const next = (await api.listFiles(projectId)).files.map(toEditorFile);
+      setFiles(next);
+      const match = next.find((f) => f.path === path);
       if (!match) throw new ApiError(404, `File not found: ${path}`, { code: "not_found" });
       return match.id;
     },
@@ -217,97 +198,83 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
 
   /** Fetches a file's inline content, unless the buffer already holds it. */
   const fetchContent = useCallback(
-    async (path: string): Promise<string> => {
+    (path: string): Promise<string> => {
       const cached = latest.current.contents[path];
-      if (cached !== undefined) return cached;
+      if (cached !== undefined) return Promise.resolve(cached);
 
-      const file = latest.current.files.find((f) => f.path === path);
-      if (file && !file.isText) return "";
-
-      const detail = await api.getFile(projectId, await fileIdFor(path));
-      return detail.content ?? "";
+      let pending = inflight.current.get(path);
+      if (!pending) {
+        pending = fileIdFor(path)
+          .then((id) => api.getFile(projectId, id))
+          .then((detail) => detail.content ?? "")
+          .finally(() => inflight.current.delete(path));
+        inflight.current.set(path, pending);
+      }
+      return pending;
     },
     [projectId, fileIdFor],
   );
 
-  // Initial load: project metadata plus the file list.
+  /** Stores fetched text without clobbering a buffer the user has since edited. */
+  const adoptContents = useCallback((loaded: Record<string, string>) => {
+    setContents((current) => {
+      const fresh = Object.keys(loaded).filter((path) => current[path] === undefined);
+      if (fresh.length === 0) return current;
+      const next = { ...current };
+      for (const path of fresh) next[path] = loaded[path];
+      return next;
+    });
+  }, []);
+
+  // Initial load: project metadata, the file list and who is asking.
   useEffect(() => {
-    // Wait for Clerk to load before making API calls
-    if (!clerkLoaded || !isSignedIn || !projectId) {
-      if (clerkLoaded && !isSignedIn) {
-        setIsLoading(false);
-      }
-      return;
-    }
+    if (!clerkLoaded || !isSignedIn || !projectId) return;
 
     const controller = new AbortController();
-    let cancelled = false;
+    const { signal } = controller;
 
     (async () => {
-      // Inside the async body rather than the effect body: `isLoading` already
-      // starts true, and setting it here avoids a synchronous re-render.
-      setIsLoading(true);
-      setLoadError(null);
-
       try {
-        const [projectDetail, fileList] = await Promise.all([
-          api.getProject(projectId, { signal: controller.signal }),
-          api.listFiles(projectId, { signal: controller.signal }),
+        // The profile is fetched here rather than through the dashboard's
+        // `useCurrentUser`, which also loads the storage quota the editor never shows.
+        const [projectDetail, fileList, me] = await Promise.all([
+          api.getProject(projectId, { signal }),
+          api.listFiles(projectId, { signal }),
+          api.me({ signal }),
         ]);
-        if (cancelled) return;
+        if (signal.aborted) return;
 
         setProject(projectDetail);
+        setUserId(me.id);
         setFiles(fileList.files.map(toEditorFile));
+        setLoadError(null);
 
-        const initial = pickInitialFile(fileList.files);
+        const preferred = fileList.files.some((f) => f.path === preferredPath) ? preferredPath : null;
+        const initial = preferred ?? pickInitialFile(fileList.files);
         if (initial) setSelectedPath((current) => current ?? initial);
       } catch (cause) {
-        if (cancelled || controller.signal.aborted) return;
-        setLoadError(
-          cause instanceof ApiError ? cause : new ApiError(0, "Could not load project"),
-        );
+        if (signal.aborted) return;
+        setLoadError(cause instanceof ApiError ? cause : new ApiError(0, "Could not load project"));
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!signal.aborted) setIsLoading(false);
       }
     })();
 
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clerkLoaded, isSignedIn, projectId]);
+    return () => controller.abort();
+  }, [clerkLoaded, isSignedIn, projectId, preferredPath]);
 
-  /** Loads the selected file's content whenever the selection changes. */
+  /** Loads the selected file's content the first time it is opened. */
   useEffect(() => {
     if (!selectedPath) return;
-
-    let cancelled = false;
     const file = files.find((f) => f.path === selectedPath);
-    if (!file?.isText) return;
+    if (!file?.isText || latest.current.contents[selectedPath] !== undefined) return;
 
-    if (contents[selectedPath] !== undefined) return;
-
-    (async () => {
-      try {
-        const detail = await api.getFile(projectId, await fileIdFor(selectedPath));
-        if (cancelled) return;
-        setContents((current) => ({ ...current, [selectedPath]: detail.content ?? "" }));
-      } catch {
-        // A failed load leaves an empty buffer rather than blocking the editor;
-        // the file remains selectable and saving will overwrite it.
-        if (!cancelled) {
-          setContents((current) =>
-            current[selectedPath] === undefined ? { ...current, [selectedPath]: "" } : current,
-          );
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedPath, projectId, files, contents, fileIdFor]);
+    fetchContent(selectedPath)
+      // A failed load leaves an empty buffer rather than blocking the editor;
+      // the file remains selectable and saving will overwrite it.
+      .catch(() => "")
+      .then((text) => adoptContents({ [selectedPath]: text }));
+  }, [selectedPath, files, fetchContent, adoptContents]);
 
   const persist = useCallback(
     async (path: string): Promise<boolean> => {
@@ -318,23 +285,24 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
       setSaveError(null);
 
       try {
-        const fileId = await fileIdFor(path);
-        await api.updateFile(projectId, fileId, { content: text });
-        setDirtyPaths((current) => {
-          if (!current.has(path)) return current;
-          const next = new Set(current);
-          next.delete(path);
-          return next;
-        });
+        await api.updateFile(projectId, await fileIdFor(path), { content: text });
+        // Only clear the flag if no keystroke landed while the request was out;
+        // otherwise the newer text is still unsaved and its timer will write it.
+        if (latest.current.contents[path] === text) {
+          setDirtyPaths((current) => {
+            if (!current.has(path)) return current;
+            const next = new Set(current);
+            next.delete(path);
+            return next;
+          });
+        }
         setSaveState("saved");
         return true;
       } catch (cause) {
         // The edit stays in the buffer and remains dirty, so nothing is lost and
         // the next keystroke or manual save retries it.
         setSaveState("error");
-        setSaveError(
-          cause instanceof ApiError ? cause.message : "Could not save file",
-        );
+        setSaveError(cause instanceof ApiError ? cause.message : "Could not save file");
         return false;
       }
     },
@@ -358,10 +326,10 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   /**
    * Flushes every dirty buffer immediately, ignoring the debounce.
    *
-   * Used when the page is being hidden or torn down. The pending timers are
-   * discarded rather than awaited: a backgrounded tab has its timers throttled
-   * (Chrome after 10s, Firefox after 30s), so waiting for the debounce would
-   * often mean never saving at all.
+   * Used when the page is being torn down. The pending timers are discarded
+   * rather than awaited: a backgrounded tab has its timers throttled (Chrome
+   * after 10s, Firefox after 30s), so waiting for the debounce would often mean
+   * never saving at all.
    */
   const flushDirty = useCallback(async () => {
     const dirty = [...latest.current.dirtyPaths];
@@ -373,14 +341,7 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   // Unmount must not discard pending work. An earlier version cancelled the timers
   // here to avoid a setState-after-unmount warning, which silently threw away any
   // edit made inside the debounce window -- real data loss on every navigation.
-  const isMounted = useRef(true);
-  useEffect(() => {
-    isMounted.current = true;
-    return () => {
-      isMounted.current = false;
-      void flushDirty();
-    };
-  }, [flushDirty]);
+  useEffect(() => () => void flushDirty(), [flushDirty]);
 
   /**
    * Saves when the tab is hidden or closed.
@@ -400,26 +361,24 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
     if (!canEdit) return;
 
     const onHidden = () => {
-      const dirty = [...latest.current.dirtyPaths];
-      if (dirty.length === 0) return;
-
-      void (async () => {
-        for (const path of dirty) {
-          const text = latest.current.contents[path];
-          if (text === undefined) continue;
-
-          try {
-            const fileId = await fileIdFor(path);
-            // Keepalive lets the request outlive the document; browsers cap the
-            // body, past which they drop it, hence the byte check.
-            const smallEnough = new Blob([text]).size <= KEEPALIVE_MAX_BYTES;
-            await api.updateFile(projectId, fileId, { content: text }, { keepalive: smallEnough });
-          } catch {
-            // Nothing useful can be reported once the page is going away; the
-            // dirty flag would have been cleared on the next successful save.
-          }
-        }
-      })();
+      for (const path of latest.current.dirtyPaths) {
+        const text = latest.current.contents[path];
+        if (text === undefined) continue;
+        void fileIdFor(path)
+          .then((fileId) =>
+            api.updateFile(
+              projectId,
+              fileId,
+              { content: text },
+              // Keepalive lets the request outlive the document; browsers cap
+              // the body, past which they drop it, hence the byte check.
+              { keepalive: new Blob([text]).size <= KEEPALIVE_MAX_BYTES },
+            ),
+          )
+          // Nothing useful can be reported once the page is going away; the
+          // dirty flag stays set, so the next save retries.
+          .catch(() => undefined);
+      }
     };
 
     const onVisibilityChange = () => {
@@ -441,7 +400,7 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
       if (!path) return;
 
       setContents((current) => ({ ...current, [path]: value }));
-      setDirtyPaths((current) => new Set(current).add(path));
+      setDirtyPaths((current) => (current.has(path) ? current : new Set(current).add(path)));
       setSaveState("idle");
       scheduleSave(path);
     },
@@ -470,42 +429,43 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
     [clearTimer, persist],
   );
 
-  const refreshFiles = useCallback(async () => {
-    try {
-      const next = await loadFileList();
-      setSelectedPath((current) => {
-        if (current && next.some((f) => f.path === current)) return current;
-        return pickInitialFile(next);
+  /** Forgets a path locally once the API no longer has it. */
+  const dropLocal = useCallback(
+    (path: string) => {
+      clearTimer(path);
+      setContents((current) => {
+        const next = { ...current };
+        delete next[path];
+        return next;
       });
-    } catch {
-      // A failed refresh leaves the current list in place; the next action retries.
-    }
-  }, [loadFileList]);
+      setDirtyPaths((current) => {
+        if (!current.has(path)) return current;
+        const next = new Set(current);
+        next.delete(path);
+        return next;
+      });
+    },
+    [clearTimer],
+  );
 
   const createFile = useCallback(
     async (path: string, initialContent = "", fileType?: string) => {
-      try {
-        const normalizedPath = path.trim();
-        const existingFile = latest.current.files.find((f: EditorFile) => f.path === normalizedPath);
-        if (existingFile) {
-          setSaveError(`A file named "${normalizedPath}" already exists`);
-          return false;
-        }
+      const normalizedPath = path.trim();
+      if (latest.current.files.some((f) => f.path === normalizedPath)) {
+        setSaveError(`A file named "${normalizedPath}" already exists`);
+        return false;
+      }
 
-        const payload: { path: string; content: string; type?: string } = {
+      try {
+        const created = await api.uploadFile(projectId, {
           path: normalizedPath,
           content: initialContent,
-        };
-        if (fileType) payload.type = fileType;
+          ...(fileType ? { type: fileType } : {}),
+        });
 
-        await api.uploadFile(projectId, payload);
-
-        // Only keep text files in the editor state. Binary files (images, PDFs)
-        // are stored in R2 and fetched via download URL when needed.
-        if (!fileType || [".tex", ".bib", ".sty", ".cls", ".bst", ".txt", ".md", ".cfg", ".def", ".ltx"].includes(`.${fileType}`)) {
-          setContents((current) => ({ ...current, [normalizedPath]: initialContent }));
-        }
-        await refreshFiles();
+        // Binaries (images, PDFs) live in object storage and are never buffered.
+        if (isTextPath(normalizedPath)) adoptContents({ [normalizedPath]: initialContent });
+        setFiles((current) => [...current, toEditorFile(created)]);
         setSelectedPath(normalizedPath);
         return true;
       } catch (cause) {
@@ -513,34 +473,24 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
         return false;
       }
     },
-    [projectId, refreshFiles],
+    [projectId, adoptContents],
   );
 
   const deleteFile = useCallback(
     async (path: string) => {
       try {
-        const fileId = await fileIdFor(path);
-        await api.deleteFile(projectId, fileId);
-
-        clearTimer(path);
-        setContents((current) => {
-          const next = { ...current };
-          delete next[path];
-          return next;
-        });
-        setDirtyPaths((current) => {
-          const next = new Set(current);
-          next.delete(path);
-          return next;
-        });
-        await refreshFiles();
+        await api.deleteFile(projectId, await fileIdFor(path));
+        dropLocal(path);
+        const remaining = latest.current.files.filter((f) => f.path !== path);
+        setFiles(remaining);
+        setSelectedPath((current) => (current === path ? pickInitialFile(remaining) : current));
         return true;
       } catch (cause) {
         setSaveError(cause instanceof ApiError ? cause.message : "Could not delete file");
         return false;
       }
     },
-    [projectId, fileIdFor, clearTimer, refreshFiles],
+    [projectId, fileIdFor, dropLocal],
   );
 
   /**
@@ -554,22 +504,16 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
   const renameFile = useCallback(
     async (fromPath: string, toPath: string) => {
       try {
-        const content = latest.current.contents[fromPath] ?? "";
-        await api.uploadFile(projectId, { path: toPath, content });
-        const fileId = await fileIdFor(fromPath);
-        await api.deleteFile(projectId, fileId);
+        const content = await fetchContent(fromPath);
+        const created = await api.uploadFile(projectId, { path: toPath, content });
+        await api.deleteFile(projectId, await fileIdFor(fromPath));
 
-        setContents((current) => {
-          const next = { ...current, [toPath]: content };
-          delete next[fromPath];
-          return next;
-        });
-        setDirtyPaths((current) => {
-          const next = new Set(current);
-          next.delete(fromPath);
-          return next;
-        });
-        await refreshFiles();
+        dropLocal(fromPath);
+        adoptContents({ [toPath]: content });
+        setFiles((current) => [
+          ...current.filter((f) => f.path !== fromPath),
+          toEditorFile(created),
+        ]);
         setSelectedPath(toPath);
         return true;
       } catch (cause) {
@@ -577,81 +521,77 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
         return false;
       }
     },
-    [projectId, fileIdFor, refreshFiles],
+    [projectId, fetchContent, fileIdFor, dropLocal, adoptContents],
   );
 
   /**
-   * Loads every text file's content, preferring buffers that are already in memory.
+   * Every text file's content, preferring buffers that are already in memory.
    *
-   * Shared with the review page so both entry points compile the same bytes from
-   * the same rule: unsaved buffers win, because that is what the user can see.
+   * The main file goes first because the API compiles the first `.tex` it sees.
    */
   const loadAllContents = useCallback(async (): Promise<Record<string, string>> => {
+    const textFiles = latest.current.files.filter((f) => f.isText);
+    const main = pickInitialFile(textFiles);
+    const ordered = [...textFiles].sort((a, b) => Number(b.path === main) - Number(a.path === main));
+
+    const texts = await Promise.all(ordered.map((f) => fetchContent(f.path)));
     const payload: Record<string, string> = {};
-    for (const file of latest.current.files) {
-      if (!file.isText) continue;
-      payload[file.path] = latest.current.contents[file.path] ?? (await fetchContent(file.path));
-    }
+    ordered.forEach((f, i) => (payload[f.path] = texts[i]));
+    adoptContents(payload);
     return payload;
-  }, [fetchContent]);
+  }, [fetchContent, adoptContents]);
 
-  /** Runs a compile and records the result, shared by the editor and review page. */
-  const runCompile = useCallback(async () => {
-    // Already running: return null rather than a bare undefined so the resolved
-    // type stays `CompileResponse | null`.
-    if (isCompiling) return null;
-
+  const compileNow = useCallback(async () => {
+    if (compiling.current) return;
+    compiling.current = true;
     setIsCompiling(true);
     setCompileError(null);
 
     try {
-      // Write the open buffer first: the PDF must reflect what is on screen.
-      await saveNow();
+      // Persist in parallel: the compile reads the buffers, not the stored files.
+      void saveNow();
 
       const payload = await loadAllContents();
       if (Object.keys(payload).length === 0) {
         setCompileError("This project has no text files to compile.");
-        return null;
+        return;
       }
 
       // project_id lets the API add the stored images/PDFs, which never live
       // in the browser's buffers.
       const result = await api.compile({ files: payload, draft: draftMode, project_id: projectId });
       setCompileResult(result);
-      
-      // Persist to localStorage so it survives refresh
+
       try {
-        localStorage.setItem(`compile_result_${projectId}`, JSON.stringify(result));
-      } catch (err) {
-        console.warn("Failed to store compile result:", err);
+        localStorage.setItem(storageKey(projectId), JSON.stringify(result));
+      } catch {
+        // Over quota (large PDFs) or storage disabled; the result still shows.
       }
-      
-      return result;
     } catch (cause) {
-      setCompileError(
-        cause instanceof ApiError ? cause.message : "Compilation failed to start",
-      );
-      return null;
+      setCompileError(cause instanceof ApiError ? cause.message : "Compilation failed to start");
     } finally {
+      compiling.current = false;
       setIsCompiling(false);
     }
-  }, [isCompiling, loadAllContents, saveNow]);
+  }, [draftMode, loadAllContents, projectId, saveNow]);
 
   const selectedFile = files.find((f) => f.path === selectedPath) ?? null;
-  const content = selectedPath && selectedFile?.isText ? (contents[selectedPath] ?? "") : "";
+  const isText = selectedPath !== null && selectedFile?.isText === true;
 
   return {
     project,
     files,
     tree: useMemo(() => buildFileTree(files), [files]),
     selectedPath,
-    content,
-    contentsFor: (path: string) => contents[path],
-    loadAllContents,
-    isLoading,
+    content: isText ? (contents[selectedPath] ?? "") : "",
+    isFileLoading: isText && contents[selectedPath] === undefined,
+    getBuffers: useCallback(() => latest.current.contents, []),
+    // Signed out: nothing will load, and the page redirects.
+    isLoading: isLoading && !(clerkLoaded && !isSignedIn),
     loadError,
     canEdit,
     isReadOnly,
+    role,
     saveState,
     saveError,
     dirtyPaths,
@@ -666,21 +606,6 @@ export function useEditorProject(projectId: string, userId: string | null): UseE
     compileError,
     draftMode,
     setDraftMode,
-    // Wrapped so the public signature stays `Promise<void>`; `compileAndReport`
-    // exposes the response for callers that need the outcome.
-    compileNow: async () => {
-      await runCompile();
-    },
-    compileAndReport: runCompile,
-    refreshFiles,
+    compileNow,
   };
-}
-
-/** Convenience accessor for the diagnostics the editor surfaces. */
-export function diagnosticsOf(result: CompileResponse | null): {
-  errors: Diagnostic[];
-  warnings: Diagnostic[];
-} {
-  if (!result) return { errors: [], warnings: [] };
-  return { errors: result.errors ?? [], warnings: result.warnings ?? [] };
 }

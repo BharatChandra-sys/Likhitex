@@ -21,7 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import RequireViewer, get_current_user
 from app.cache.redis import get_redis_manager
-from app.compile.backend import CompileBackend, CompileResult, FileMap, get_compile_backend
+from app.compile.backend import (
+    ENGINES,
+    CompileBackend,
+    CompileResult,
+    FileMap,
+    get_compile_backend,
+)
 from app.config import settings
 from app.db import File, User
 from app.db.base import get_db
@@ -39,35 +45,20 @@ _compile_slots = asyncio.Semaphore(max(1, settings.COMPILE_MAX_CONCURRENT))
 # Control characters and NUL are never valid in a project file path.
 _PATH_RE = re.compile(r"^[\w./@+()-]+$")
 
+# Upstash caps a request at 10 MB and the free database at 256 MB, so only
+# PDFs that fit comfortably (base64 PDF + SyncTeX) are cached.
+_CACHE_MAX_CHARS = 3_000_000
+
 
 def compute_compilation_fingerprint(files: dict[str, str]) -> str:
     """
-    Compute hash of semantically significant content.
+    Hash the exact job input for the compile cache.
 
-    Strips LaTeX comments and normalizes whitespace to detect real changes.
-    This allows cache hits for whitespace-only or comment-only edits.
-
-    Args:
-        files: Mapping of file paths to content
-
-    Returns:
-        SHA256 hash of normalized content
+    Deliberately byte-exact: in TeX a blank line starts a paragraph, `\\%` is
+    literal text, and verbatim keeps whitespace, so "normalising" the source
+    returns a stale PDF for edits that do change the output.
     """
-    normalized = {}
-
-    for path, content in files.items():
-        if path.endswith('.tex'):
-            # Strip LaTeX comments (lines starting with %)
-            clean = re.sub(r'%.*$', '', content, flags=re.MULTILINE)
-            # Normalize whitespace (spaces, tabs, newlines)
-            clean = re.sub(r'\s+', ' ', clean.strip())
-            normalized[path] = clean
-        else:
-            # Binary files or other formats: use as-is
-            normalized[path] = content
-
-    # Sort by filename for consistency
-    canonical = json.dumps(normalized, sort_keys=True)
+    canonical = json.dumps(files, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -136,6 +127,8 @@ class CompileResponse(BaseModel):
     compile_time: float = Field(0.0, description="Wall-clock seconds")
     error: str | None = None
     error_type: str | None = None
+    engine: str | None = Field(None, description="TeX engine used: pdflatex, xelatex or lualatex")
+    main: str | None = Field(None, description="Root document that was compiled")
 
 
 async def _project_assets(
@@ -263,7 +256,8 @@ async def compile_latex(
     fingerprint = compute_compilation_fingerprint(
         {**body.files, **{path: f"sha256:{file_hash}" for path, file_hash, _ in assets}}
     )
-    cache_key = f"compiled-pdf:{'draft' if draft else 'full'}:{fingerprint}"
+    # The requested root is part of the key: the same files compile differently.
+    cache_key = f"compiled-pdf:{'draft' if draft else 'full'}:{body.main or ''}:{fingerprint}"
 
     # Try to get from Redis cache (gracefully handle unavailable Redis)
     try:
@@ -286,6 +280,8 @@ async def compile_latex(
                     compile_time=0.0,  # Cached, instant
                     error=cached_data.get("error"),
                     error_type=cached_data.get("error_type"),
+                    engine=cached_data.get("engine"),
+                    main=cached_data.get("main"),
                 )
     except Exception as exc:
         logger.warning("Cache lookup failed: %s", exc)
@@ -305,7 +301,9 @@ async def compile_latex(
 
     try:
         async with _compile_slots:
-            result: CompileResult = await backend.compile(compile_files, draft_mode=draft)
+            result: CompileResult = await backend.compile(
+                compile_files, draft_mode=draft, main=body.main
+            )
     except HTTPException:
         raise
     except Exception as exc:
@@ -328,10 +326,13 @@ async def compile_latex(
         compile_time=result.compile_time,
         error=result.error_message,
         error_type=result.error_type,
+        engine=result.extra.get("engine"),
+        main=result.extra.get("main"),
     )
 
     # Cache successful compilations for 1 hour
-    if result.success:
+    cache_size = len(response.pdf or "") + len(response.synctex or "")
+    if result.success and cache_size <= _CACHE_MAX_CHARS:
         try:
             redis_mgr = get_redis_manager()
             if redis_mgr.is_connected:
@@ -346,6 +347,8 @@ async def compile_latex(
                         "warnings": result.warnings,
                         "error_type": result.error_type,
                         "error": result.error_message,
+                        "engine": response.engine,
+                        "main": response.main,
                     },
                     ex=3600  # 1 hour
                 )
@@ -418,6 +421,16 @@ async def compile_health() -> dict[str, Any]:
             "backend": backend_name,
             "reason": "image_not_built",
             "message": f"Build it with: docker build -t {settings.COMPILE_IMAGE} apps/compiler/",
+        }
+
+    if backend_name == "direct":
+        import shutil
+
+        engines = {name: shutil.which(name) is not None for name in ENGINES}
+        return {
+            "status": "healthy" if engines["pdflatex"] else "unhealthy",
+            "backend": backend_name,
+            "engines": engines,
         }
 
     if not settings.COMPILE_REMOTE_ENDPOINT:

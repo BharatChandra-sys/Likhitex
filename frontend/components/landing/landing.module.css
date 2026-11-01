@@ -1,0 +1,115 @@
+/*
+ * Landing and auth styles that Tailwind utilities cannot express on their own.
+ *
+ * Theme variables are read with literal fallbacks: `@theme inline` does not
+ * guarantee the custom properties exist at runtime, and this file must not
+ * depend on how globals.css emits them.
+ *
+ * Motion is CSS-only. The reveal and the scroll-progress bar use scroll-driven
+ * animations, so the page ships no JavaScript for them; browsers without
+ * `animation-timeline` support, and anyone who asked for reduced motion, simply
+ * get static content.
+ */
+
+.root {
+  /* The app chrome is 13px for a dense editor; a page read at a glance needs a
+     larger, deliberate scale, scoped here so the app keeps its density. */
+  --step--1: 0.8125rem; /* 13px meta */
+  --step-0: 1rem; /* 16px body */
+  --step-1: 1.125rem; /* 18px lede */
+  --step-2: clamp(1.25rem, 1.1rem + 0.6vw, 1.5rem); /* 20 → 24px */
+  --step-3: clamp(1.625rem, 1.35rem + 1.1vw, 2.125rem); /* 26 → 34px */
+  --step-4: clamp(2.125rem, 1.55rem + 2.6vw, 3.5rem); /* 34 → 56px hero */
+
+  font-size: var(--step-0);
+  line-height: 1.6;
+}
+
+.root :is(h1, h2, h3) {
+  font-family: var(--font-serif, "Source Serif 4"), Georgia, "Times New Roman", serif;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+.root p {
+  text-wrap: pretty;
+}
+
+/* One visible focus treatment for every link, button and summary on the page. */
+.root :focus-visible {
+  outline: 2px solid var(--color-primary, #4f46e5);
+  outline-offset: 2px;
+}
+
+/* Faint indigo wash behind the hero; depth comes from type and space. */
+.wash {
+  background: radial-gradient(
+    60% 60% at 30% 30%,
+    var(--color-primary-fixed, #e2dfff) 0%,
+    transparent 70%
+  );
+}
+
+/* Fades the bottom of the product mock into the page. */
+.fadeBottom {
+  mask-image: linear-gradient(to bottom, black 78%, transparent);
+}
+
+/* Shell for the sign-in and sign-up screens: the hero wash over a fine grid. */
+.authBackdrop {
+  background-color: var(--color-surface, #f8f9fb);
+  background-image:
+    radial-gradient(70% 45% at 50% 0%, var(--color-primary-fixed, #e2dfff) 0%, transparent 70%),
+    linear-gradient(to right, rgb(25 28 30 / 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(25 28 30 / 0.035) 1px, transparent 1px);
+  background-size: auto, 24px 24px, 24px 24px;
+}
+
+.progress {
+  display: none;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
+
+@keyframes grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .caret {
+    animation: blink 1.1s steps(1) infinite;
+  }
+
+  @supports (animation-timeline: view()) {
+    .reveal {
+      animation: rise-in linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 60%;
+    }
+
+    .progress {
+      display: block;
+      transform-origin: left;
+      animation: grow linear both;
+      animation-timeline: scroll(root);
+    }
+  }
+}

@@ -146,13 +146,13 @@ services:
       
       # === Compilation ===
       - key: COMPILE_TIMEOUT_SECONDS
-        value: "60"
+        value: "80"  # Below the browser's 90s; TeX is slow on 0.1 CPU
       
       - key: COMPILE_BACKEND
         value: direct  # Use 'direct' for free tier (in-process), 'local' for Docker
       
       - key: COMPILE_MAX_CONCURRENT
-        value: "2"  # Limit concurrent compilations on free tier
+        value: "1"  # Limit concurrent compilations on free tier
       
       - key: COMPILE_MEMORY_LIMIT
         value: 256m  # Per-compile memory limit

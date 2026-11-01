@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
+import { Inter, JetBrains_Mono, Source_Serif_4 } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
 import { ClerkTokenBridge } from "@/components/auth/ClerkTokenBridge";
 import "./globals.css";
 
+// Self-hosted at build time: no request to Google at runtime, and the fallback
+// metrics are adjusted so the swap does not shift layout.
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
@@ -14,6 +16,13 @@ const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
   display: "swap",
+});
+
+const sourceSerif = Source_Serif_4({
+  subsets: ["latin"],
+  variable: "--font-source-serif",
+  display: "swap",
+  axes: ["opsz"],
 });
 
 export const metadata: Metadata = {
@@ -39,7 +48,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${jetbrainsMono.variable} h-full`}
+      className={`${inter.variable} ${jetbrainsMono.variable} ${sourceSerif.variable} h-full`}
     >
       <body className="min-h-full bg-surface text-on-surface font-sans antialiased">
         {/*
@@ -54,7 +63,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               socialButtonsVariant: "iconButton",
             },
             variables: {
-              colorPrimary: "#2563eb",
+              // The design system's primary, so Clerk's own widgets (UserButton,
+              // account modals) match the app chrome.
+              colorPrimary: "#4F46E5",
             },
             elements: {
               rootBox: "font-sans",

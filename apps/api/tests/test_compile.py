@@ -201,8 +201,7 @@ def test_compile_health_endpoint(client):
     assert "status" in body
     assert "backend" in body
 
-    if body["status"] == "healthy":
-        assert body["backend"] == "local"
+    assert body["backend"] in {"local", "direct", "remote"}
 
 
 # --- Full container path -----------------------------------------------------
@@ -424,7 +423,7 @@ class _RecordingBackend:
     def __init__(self):
         self.files = None
 
-    async def compile(self, files, draft_mode=False):
+    async def compile(self, files, draft_mode=False, main=None):
         from app.compile.backend import CompileResult
 
         self.files = files
@@ -495,3 +494,139 @@ def test_compile_refuses_projects_the_caller_cannot_see(authed_client, monkeypat
     )
 
     assert response.status_code == 404
+
+
+# --- Direct backend: what counts as a failed compile ---------------------------
+
+
+def _fake_tex(monkeypatch, outcomes):
+    """Replace TeX: each outcome is an exit code, or an exception to raise."""
+    from pathlib import Path
+
+    from app.compile import backend as compile_backend
+
+    remaining = list(outcomes)
+
+    def run_tool(argv, cwd, env, timeout):
+        outcome = remaining.pop(0)
+        if isinstance(outcome, Exception):
+            (Path(cwd) / "main.pdf").write_bytes(b"truncated")
+            raise outcome
+        (Path(cwd) / "main.pdf").write_bytes(b"%PDF-complete")
+        (Path(cwd) / "main.log").write_text(
+            "./main.tex:3: Undefined control sequence.\nRerun to get cross-references right.\n"
+        )
+        return outcome
+
+    monkeypatch.setattr(compile_backend, "_run_tool", run_tool)
+    return compile_backend.DirectCompileBackend()
+
+
+def test_recoverable_tex_error_still_returns_the_pdf(monkeypatch):
+    """pdfTeX exits 1 for an undefined macro but writes a usable PDF."""
+    backend = _fake_tex(monkeypatch, [1, 1, 1, 1])
+
+    result = backend._compile_sync({"main.tex": TEX}, False, None)
+
+    assert result.success is True
+    assert result.pdf == b"%PDF-complete"
+    assert result.errors
+
+
+def test_timeout_on_a_later_pass_returns_the_last_complete_pdf(monkeypatch):
+    backend = _fake_tex(monkeypatch, [0, subprocess.TimeoutExpired("pdflatex", 1)])
+
+    result = backend._compile_sync({"main.tex": TEX}, False, None)
+
+    assert result.success is True
+    assert result.pdf == b"%PDF-complete"
+    assert any("out of date" in warning["message"] for warning in result.warnings)
+
+
+def test_timeout_on_the_first_pass_is_a_failure(monkeypatch):
+    backend = _fake_tex(monkeypatch, [subprocess.TimeoutExpired("pdflatex", 1)])
+
+    result = backend._compile_sync({"main.tex": TEX}, False, None)
+
+    assert result.success is False
+    assert result.error_type == "timeout"
+
+
+def test_root_document_is_not_just_the_first_tex_file():
+    """Files arrive sorted by path, so abstract.tex sorts before main.tex."""
+    from app.compile.backend import choose_main_file
+
+    files = {
+        "abstract.tex": "Some text",
+        "chapters/intro.tex": "More text",
+        "main.tex": "\\documentclass{article}\\begin{document}\\input{abstract}\\end{document}",
+    }
+    assert choose_main_file(files) == "main.tex"
+    assert choose_main_file({"a.tex": "x", "paper.tex": "\\documentclass{a}"}) == "paper.tex"
+    assert choose_main_file(files, "abstract.tex") == "abstract.tex"
+
+
+async def test_direct_compile_does_not_block_other_requests(monkeypatch):
+    """The event loop must keep serving while TeX runs on a slow CPU."""
+    import asyncio
+    import time
+
+    from app.compile.backend import DirectCompileBackend
+
+    backend = DirectCompileBackend()
+    monkeypatch.setattr(backend, "_compile_sync", lambda *args: time.sleep(0.3))
+
+    job = asyncio.create_task(backend.compile({"main.tex": TEX}))
+    ticks = 0
+    while not job.done():
+        await asyncio.sleep(0.01)
+        ticks += 1
+
+    assert ticks > 5
+
+
+def test_fingerprint_sees_blank_lines_and_text_after_escaped_percent():
+    from app.compile.routes import compute_compilation_fingerprint as fingerprint
+
+    assert fingerprint({"main.tex": "One\n\nTwo"}) != fingerprint({"main.tex": "One\nTwo"})
+    assert fingerprint({"main.tex": "50\\% a"}) != fingerprint({"main.tex": "50\\% b"})
+
+
+@pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex not installed")
+async def test_real_multifile_project_with_a_recoverable_error():
+    from app.compile.backend import DirectCompileBackend
+
+    result = await DirectCompileBackend(timeout=120).compile(
+        {
+            "abstract.tex": "An abstract with \\undefinedmacro{} in it.",
+            "main.tex": (
+                "\\documentclass{article}\n\\begin{document}\n\\input{abstract}\n"
+                "\\section{One}\\label{a} See \\ref{a}.\n\\end{document}\n"
+            ),
+        }
+    )
+
+    assert result.success is True, result.log[-800:]
+    assert result.pdf.startswith(b"%PDF")
+    assert result.extra["main"] == "main.tex"
+    assert any("Undefined control sequence" in error["message"] for error in result.errors)
+
+
+def test_log_parser_reads_file_line_error_format():
+    """-file-line-error is what real compiles emit; the UI needs file and line."""
+    from app.compile.log_parser import parse_latex_log
+
+    errors = parse_latex_log(
+        "./chapters/intro.tex:12: Undefined control sequence.\r\n"
+        "main.tex:3: LaTeX Error: File `missing.sty' not found.\n"
+        "main.tex:9: Package babel Error: Unknown option `klingon'.\n"
+    )["errors"]
+
+    assert errors[0] == {
+        "file": "chapters/intro.tex",
+        "line": 12,
+        "message": "Undefined control sequence.",
+        "severity": "error",
+    }
+    assert errors[1]["message"] == "File `missing.sty' not found."
+    assert errors[2]["message"] == "[babel] Unknown option `klingon'."

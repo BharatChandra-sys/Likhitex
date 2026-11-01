@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Grid3X3,
   List,
@@ -75,6 +76,14 @@ export default function ProjectsDashboard() {
     goToPage,
     reload,
   } = useProjects();
+
+  // Listing your own projects only returns 403 when the account itself is
+  // refused (not invited, or blocked). Retrying cannot fix that.
+  const router = useRouter();
+  const accountRefused = error?.status === 403;
+  useEffect(() => {
+    if (accountRefused) router.replace("/no-access");
+  }, [accountRefused, router]);
 
   const [bucket, setBucket] = useState<ProjectBucket>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("list");

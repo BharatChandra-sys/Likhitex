@@ -49,7 +49,6 @@ import FileTree from "@/components/editor/FileTree";
 import SymbolPalette from "@/components/editor/SymbolPalette";
 import PdfPreview from "@/components/editor/PdfPreview";
 import CompileLogsDrawer from "@/components/editor/CompileLogsDrawer";
-import CompileStatusBanner from "@/components/editor/CompileStatusBanner";
 import { EditorLoadingSkeleton } from "@/components/editor/EditorLoadingSkeleton";
 import { ConnectionBanner } from "@/components/editor/ConnectionBanner";
 import { ServerWaking } from "@/components/editor/ServerWaking";
@@ -85,13 +84,12 @@ export default function EditorPage() {
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isLayoutSplit, setIsLayoutSplit] = useState(true);
   const [cursor, setCursor] = useState<CursorPosition>({ line: 1, column: 1 });
-  const [jumpToLine, setJumpToLine] = useState<number | null>(null);
+  const [jumpTo, setJumpTo] = useState<{ line: number } | null>(null);
   const [command, setCommand] = useState<EditorCommand | null>(null);
   const [history, setHistory] = useState<HistoryState>({ canUndo: false, canRedo: false });
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
   /** Distinguishes repeated jumps to the same line, which a number cannot. */
-  const [jumpNonce, setJumpNonce] = useState(0);
 
   // ── Active sidebar panel — null means panel is collapsed ──────────────────
   type SidePanel = "files" | "search" | "history";
@@ -133,6 +131,7 @@ export default function EditorPage() {
     dirtyPaths,
     selectFile,
     setContent,
+    getBuffers,
     saveNow,
     createFile,
     renameFile,
@@ -214,6 +213,13 @@ export default function EditorPage() {
     }),
     [compileResult],
   );
+  const fileDiagnostics = useMemo(
+    () =>
+      [...diagnostics.errors, ...diagnostics.warnings].filter(
+        (diagnostic) => diagnostic.file === selectedPath,
+      ),
+    [diagnostics, selectedPath],
+  );
 
   // Images and PDFs live in object storage and open in a viewer, not the editor.
   const selectedFile = files.find((f) => f.path === selectedPath) ?? null;
@@ -290,8 +296,7 @@ export default function EditorPage() {
       // The parser reports engine-level warnings against an empty path.
       const target = file && files.some((f) => f.path === file) ? file : selectedPath;
       if (target && target !== selectedPath) void selectFile(target);
-      setJumpToLine(line > 0 ? line : 1);
-      setJumpNonce((n) => n + 1);
+      setJumpTo({ line: line > 0 ? line : 1 });
     },
     [files, selectFile, selectedPath],
   );
@@ -719,8 +724,7 @@ export default function EditorPage() {
                           key={`${entry.line}-${entry.title}`}
                           type="button"
                           onClick={() => {
-                            setJumpToLine(entry.line);
-                            setJumpNonce((n) => n + 1);
+                            setJumpTo({ line: entry.line });
                           }}
                           className="w-full text-left px-2 py-0.5 truncate text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high rounded transition-colors"
                           style={{ paddingLeft: `${8 + (entry.level - 1) * 8}px` }}
@@ -866,14 +870,16 @@ export default function EditorPage() {
               <CodeEditor
                 // The nonce forces a jump even when the line number repeats, which
                 // a plain number prop cannot express.
-                key={`${selectedPath}:${jumpNonce}`}
+                key={selectedPath}
                 path={selectedPath}
                 value={content}
                 onChange={setContent}
                 readOnly={!canEdit}
                 onSave={() => void saveNow()}
                 onCursorChange={setCursor}
-                jumpToLine={jumpToLine}
+                jumpTo={jumpTo}
+                diagnostics={fileDiagnostics}
+                getBuffers={getBuffers}
                 command={command}
                 onHistoryChange={setHistory}
               />
@@ -933,11 +939,12 @@ export default function EditorPage() {
               isCompiling={isCompiling}
               error={compileError ?? (compileResult && !compileResult.success ? compileResult.error : null)}
               errorCount={diagnostics.errors.length}
+              warningCount={diagnostics.warnings.length}
+              compileTime={compileResult?.compile_time ?? null}
               onCompile={() => void compileNow()}
               onOpenLogs={() => setIsLogsOpen(true)}
               onJumpToLine={(line) => {
-                setJumpToLine(line);
-                setJumpNonce((n) => n + 1);
+                setJumpTo({ line });
               }}
             />
           </div>
@@ -972,15 +979,6 @@ export default function EditorPage() {
           <span>pdfLaTeX</span>
         </div>
       </footer>
-
-      {/* Compile status banner, shown only when there is something to say. */}
-      {(diagnostics.errors.length > 0 || diagnostics.warnings.length > 0) && (
-        <CompileStatusBanner
-          errorCount={diagnostics.errors.length}
-          warningCount={diagnostics.warnings.length}
-          onShowLogs={() => setIsLogsOpen(true)}
-        />
-      )}
 
       <CompileLogsDrawer
         isOpen={isLogsOpen}

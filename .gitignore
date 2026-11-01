@@ -125,3 +125,8 @@ DEPLOYMENT_CREDENTIALS.md
 # Production env files with real keys - never commit
 prod/
 CREDENTIALS_CONFIGURED.md
+
+# Launch video (Remotion) renders
+launch-video/out/
+RENDER_ENV_VARS.txt
+DEPLOYMENT_STEPS.md

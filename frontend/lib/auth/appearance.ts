@@ -1,78 +1,60 @@
+import type { ComponentProps } from "react";
+import type { SignUp } from "@clerk/nextjs";
+
 /**
- * Clerk component theming, shared by the sign-in and sign-up screens.
+ * Shared look for the auth cards.
  *
- * Clerk renders the interactive card (it already handles password reset, second
- * factors and OAuth error states), while the surrounding page shell is ours. This
- * object is what makes Clerk's widget match the Stitch design, so it lives in one
- * place: the two screens previously carried near-identical copies, which is how
- * the two cards drift apart.
+ * Sign-in renders its own card (see its page for why) and sign-up renders Clerk's
+ * `<SignUp>`; both read their classes from here so the two cards cannot drift
+ * apart, and both match the landing page (serif title, hairline border, the
+ * product mock's shadow).
  */
+export const authClasses = {
+  card: "w-full max-w-[400px] rounded-xl border border-surface-container-high bg-surface-container-lowest p-6 shadow-[0_1px_2px_rgba(25,28,30,0.04),0_24px_48px_-24px_rgba(25,28,30,0.18)] sm:p-8",
+  title: "font-serif text-[1.75rem] font-medium leading-tight tracking-tight text-on-surface",
+  subtitle: "text-sm text-on-surface-variant",
+  /** Reserves the card's height while clerk-js loads, so the page does not jump. */
+  placeholder: "min-h-[420px]",
+} as const;
+
 export const authAppearance = {
   variables: {
     colorPrimary: "#4F46E5",
-    colorText: "#111827",
-    colorTextSecondary: "#6B7280",
+    colorForeground: "#191C1E",
+    colorMutedForeground: "#464555",
     colorBackground: "#FFFFFF",
-    colorInputBackground: "#F9FAFB",
-    colorInputText: "#111827",
-    colorNeutral: "#6B7280",
+    colorInput: "#FFFFFF",
+    colorInputForeground: "#191C1E",
+    colorNeutral: "#464555",
     fontFamily: "var(--font-inter), system-ui, sans-serif",
     borderRadius: "0.375rem",
   },
   elements: {
-    // The page shell supplies the framing, so Clerk's own card box is suppressed.
-    cardBox: "shadow-none ring-0 border-0 bg-transparent p-0",
-    card: "w-[420px] max-w-full rounded-md border border-[#E5E7EB] shadow-sm",
+    rootBox: "w-full max-w-[400px]",
+    // Clerk's own card box is flattened so `authClasses.card` is the only frame.
+    cardBox: "w-full shadow-none ring-0 border-0 bg-transparent",
+    card: authClasses.card,
+    headerTitle: authClasses.title,
+    headerSubtitle: authClasses.subtitle,
 
-    headerTitle: "text-xl font-bold tracking-tight text-on-surface",
-    headerSubtitle: "text-xs font-normal text-on-surface-variant",
-    header: "[&_p]:mt-1",
-
+    formFieldLabel: "text-xs font-medium text-on-surface",
     formFieldInput:
-      "h-8 bg-surface-container-lowest border border-[#E5E7EB] rounded-lg text-xs placeholder:text-outline focus:border-primary-container focus:ring-0",
-    formFieldLabel: "text-xs font-medium text-[#374151]",
+      "h-9 rounded-md border border-surface-container-high bg-surface-container-lowest text-sm placeholder:text-on-surface-variant focus:border-primary focus:ring-1 focus:ring-primary",
     formButtonPrimary:
-      "h-8 bg-primary-container hover:bg-primary text-on-primary text-sm font-semibold rounded-lg",
-
+      "h-9 rounded-md bg-primary text-sm font-medium text-on-primary normal-case shadow-none hover:bg-primary/90",
     socialButtonsBlockButton:
-      "h-8 bg-surface-container-lowest border border-[#E5E7EB] text-sm font-medium hover:bg-surface-container-low",
+      "h-9 border border-surface-container-high bg-surface-container-lowest text-sm font-medium hover:bg-surface-container-low",
+    identityPreview: "rounded-md",
 
-    // Self sign-up is suppressed: the workspace is invite-only, so there is no
-    // "Don't have an account? Sign up" link to offer.
-    footerAction: "hidden",
-    footerActionLink: "hidden",
-    identityPreview: "rounded-lg",
-
-    // Hide Clerk branding footer completely
+    // The page renders its own "Already have an account?" link, and Clerk's
+    // footer (branding, development-mode badge) has no place on this screen.
     footer: "hidden",
-    footerPages: "hidden",
-    footerActionText: "hidden",
   },
-  layout: {
+  options: {
+    // The page header already carries the wordmark.
+    logoPlacement: "none",
+    socialButtonsVariant: "blockButton",
     shimmer: false,
     showOptionalFields: false,
   },
-} as const;
-
-/**
- * The two-column grid backdrop used by both auth screens.
- *
- * Declared once because it is referenced by a global `<style jsx global>` block in
- * each page, and a Tailwind class alone cannot express the two gradient axes.
- */
-export const mathGridStyles = `
-  .bg-math-grid {
-    background-color: #f9fafb;
-    background-image: linear-gradient(
-        to right,
-        rgba(229, 231, 235, 0.7) 1px,
-        transparent 1px
-      ),
-      linear-gradient(
-        to bottom,
-        rgba(229, 231, 235, 0.7) 1px,
-        transparent 1px
-      );
-    background-size: 24px 24px;
-  }
-`;
+} satisfies NonNullable<ComponentProps<typeof SignUp>["appearance"]>;

@@ -18,10 +18,15 @@ import {
   Compartment,
   EditorSelection,
   EditorState,
+  StateEffect,
+  StateField,
   type ChangeSpec,
   type Extension,
+  type Text,
 } from "@codemirror/state";
 import {
+  Decoration,
+  type DecorationSet,
   EditorView,
   keymap,
   lineNumbers,
@@ -53,12 +58,19 @@ import {
   indentUnit,
   StreamLanguage,
 } from "@codemirror/language";
-import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  completionKeymap,
+} from "@codemirror/autocomplete";
 import { searchKeymap, highlightSelectionMatches, openSearchPanel } from "@codemirror/search";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import { tags as t } from "@lezer/highlight";
 
+import type { Diagnostic } from "@/lib/api/types";
 import { extensionOf } from "@/lib/fileTree";
+import { latexCompletionSource } from "./latexCompletion";
 import {
   environmentAfterCaret,
   hasClosingEnvironment,
@@ -70,6 +82,43 @@ import {
 
 /** Extensions that get the LaTeX/STeX parser; everything else is plain text. */
 const LATEX_EXTENSIONS = new Set(["tex", "sty", "cls", "ltx", "def", "cfg", "bib"]);
+
+// `stex` is a StreamParser, not a LanguageSupport, so it needs wrapping. Defined
+// once: a fresh language per file switch would also re-parse from scratch.
+const latexLanguage = StreamLanguage.define(stex);
+const languageFor = (filePath: string): Extension =>
+  LATEX_EXTENSIONS.has(extensionOf(filePath)) ? latexLanguage : [];
+
+/**
+ * Compile diagnostics drawn as tinted lines with a severity bar.
+ *
+ * Kept in a StateField so the marks move with edits made after the compile, the
+ * way Overleaf keeps its error markers attached to the text, until the next
+ * compile replaces them. The message is the line's tooltip.
+ */
+const setDiagnostics = StateEffect.define<DecorationSet>();
+const diagnosticsField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(marks, tr) {
+    for (const effect of tr.effects) if (effect.is(setDiagnostics)) return effect.value;
+    return marks.map(tr.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+function diagnosticMarks(doc: Text, diagnostics: readonly Diagnostic[]): DecorationSet {
+  return Decoration.set(
+    diagnostics
+      .filter((d) => d.line > 0 && d.line <= doc.lines)
+      .map((d) =>
+        Decoration.line({
+          class: d.severity === "error" ? "cm-diagnostic-error" : "cm-diagnostic-warning",
+          attributes: { title: d.message },
+        }).range(doc.line(d.line).from),
+      ),
+    true,
+  );
+}
 
 /**
  * Highlight colours follow the app's Material 3 palette so the code pane does not
@@ -113,6 +162,8 @@ const noOverscrollTheme = EditorView.theme({
   ".cm-gutters": {
     minHeight: "unset",
   },
+  ".cm-diagnostic-error": { backgroundColor: "rgb(254 226 226 / 0.7)", boxShadow: "inset 3px 0 #dc2626" },
+  ".cm-diagnostic-warning": { backgroundColor: "rgb(254 243 199 / 0.7)", boxShadow: "inset 3px 0 #d97706" },
 });
 
 /**
@@ -147,10 +198,16 @@ export interface CodeEditorProps {
   onCursorChange?: (position: CursorPosition) => void;
   /**
    * 1-based line to move the caret to, e.g. when a compile error is clicked.
-   * A plain number is used rather than a callback so the effect below fires on
-   * each new request even when the line repeats.
+   * An object rather than a number so a repeated jump to the same line is a new
+   * request; the editor stays mounted, keeping its undo history.
    */
-  jumpToLine?: number | null;
+  jumpTo?: { line: number } | null;
+  /** Compile diagnostics for this file, marked on their lines. */
+  diagnostics?: readonly Diagnostic[];
+  /** Every loaded buffer, read when completing ef and cite keys. */
+  getBuffers?: () => Readonly<Record<string, string>>;
+  /** Extra CodeMirror extensions, e.g. collaboration; swapping them keeps the view. */
+  extraExtensions?: Extension[];
   /**
    * A toolbar edit to perform, e.g. wrap the selection in `\textbf{}`.
    *
@@ -171,14 +228,18 @@ export default function CodeEditor({
   readOnly = false,
   onSave,
   onCursorChange,
-  jumpToLine,
+  jumpTo,
   command,
   onHistoryChange,
+  diagnostics,
+  getBuffers,
+  extraExtensions,
 }: CodeEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const languageCompartment = useRef(new Compartment());
   const readonlyCompartment = useRef(new Compartment());
+  const extraCompartment = useRef(new Compartment());
 
   /**
    * The document text most recently pushed to the parent.
@@ -211,12 +272,7 @@ export default function CodeEditor({
   const emitHistory = useEffectEvent((canUndo: boolean, canRedo: boolean) =>
     onHistoryChange?.({ canUndo, canRedo }),
   );
-
-  const languageFor = (filePath: string): Extension =>
-    LATEX_EXTENSIONS.has(extensionOf(filePath))
-      ? // `stex` is a StreamParser, not a LanguageSupport, so it needs wrapping.
-        StreamLanguage.define(stex)
-      : [];
+  const readBuffers = useEffectEvent(() => getBuffers?.() ?? {});
 
   /**
    * Enter, taught about LaTeX.
@@ -303,11 +359,14 @@ export default function CodeEditor({
           highlightActiveLine(),
           highlightSelectionMatches(),
           syntaxHighlighting(highlightStyle),
+          diagnosticsField,
+          autocompletion({ override: [latexCompletionSource(() => readBuffers())] }),
           keymap.of([
             // Returns true so CodeMirror does not also apply its default binding.
             { key: "Mod-s", run: () => (emitSave(), true) },
             { key: "Enter", run: smartEnter },
             ...closeBracketsKeymap,
+            ...completionKeymap,
             ...defaultKeymap,
             ...searchKeymap,
             ...historyKeymap,
@@ -320,6 +379,7 @@ export default function CodeEditor({
             EditorView.editable.of(!readOnly),
           ]),
           noOverscrollTheme,
+          extraCompartment.current.of(extraExtensions ?? []),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
               // Recorded here, not in the parent. The parent's `value` is, by
@@ -400,13 +460,26 @@ export default function CodeEditor({
     });
   }, [readOnly]);
 
+  useEffect(() => {
+    viewRef.current?.dispatch({
+      effects: extraCompartment.current.reconfigure(extraExtensions ?? []),
+    });
+  }, [extraExtensions]);
+
+  // Declared after the content effect, so marks are placed on the adopted text.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: setDiagnostics.of(diagnosticMarks(view.state.doc, diagnostics ?? [])) });
+  }, [diagnostics]);
+
   // Move the caret when the parent asks, e.g. from a compile error.
   useEffect(() => {
     const view = viewRef.current;
-    if (!view || !jumpToLine) return;
+    if (!view || !jumpTo) return;
 
     // Clamp rather than throw: a stale diagnostic can point past the new file.
-    const target = Math.min(Math.max(1, jumpToLine), view.state.doc.lines);
+    const target = Math.min(Math.max(1, jumpTo.line), view.state.doc.lines);
     const line = view.state.doc.line(target);
 
     view.dispatch({
@@ -414,7 +487,7 @@ export default function CodeEditor({
       effects: EditorView.scrollIntoView(line.from, { y: "center" }),
     });
     view.focus();
-  }, [jumpToLine]);
+  }, [jumpTo]);
 
   /**
    * Perform a toolbar command.

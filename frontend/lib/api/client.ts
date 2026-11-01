@@ -21,6 +21,7 @@ import type {
   FileUploadPayload,
   ProjectDetailResponse,
   ProjectListResponse,
+  ProjectImportResponse,
   ProjectMemberResponse,
   ProjectResponse,
   QuotaResponse,
@@ -39,6 +40,7 @@ export const COMPILE_TIMEOUT_MS = 90_000;
 
 export interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  /** JSON-serialised, except `FormData`, which is sent as multipart. */
   body?: unknown;
   token?: string | null;
   signal?: AbortSignal;
@@ -150,7 +152,13 @@ async function toApiError(response: Response): Promise<ApiError> {
   });
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+/**
+ * Sends a request and returns the successful `Response`, or throws `ApiError`.
+ *
+ * Shared by the JSON helper and the blob downloads so every endpoint gets the same
+ * token, timeout and error normalisation.
+ */
+async function fetchResponse(path: string, options: RequestOptions = {}): Promise<Response> {
   const {
     method = "GET",
     body,
@@ -160,8 +168,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     keepalive = false,
   } = options;
 
+  // FormData must go out untouched: the browser writes the multipart boundary
+  // into Content-Type itself, and a hand-set header would omit it.
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
   const headers: Record<string, string> = { Accept: "application/json" };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (body !== undefined && !isForm) headers["Content-Type"] = "application/json";
 
   const resolvedToken = token ?? (await tokenProvider());
   if (resolvedToken) headers.Authorization = `Bearer ${resolvedToken}`;
@@ -176,7 +187,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       // Clerk session tokens live in an httpOnly cookie; this lets the API's own
       // cookie-based checks work without widening CORS further.
       credentials: "include",
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
       signal,
       // Lets an autosave survive the page being closed. The browser drops bodies
       // over 64 KiB when this is set, so callers must check the size first.
@@ -204,6 +215,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   if (!response.ok) {
     throw await toApiError(response);
   }
+  return response;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await fetchResponse(path, options);
 
   // 204 and 205 carry no body by definition.
   if (response.status === 204 || response.status === 205) {
@@ -256,6 +272,28 @@ export const api = {
     if (params.search) query.set("search", params.search);
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return request<ProjectListResponse>(`/api/projects/${suffix}`, options);
+  },
+
+  /** The whole project as a ZIP archive. */
+  exportProjectZip: async (projectId: string, options?: RequestOptions): Promise<Blob> =>
+    (
+      await fetchResponse(`/api/projects/${projectId}/export`, {
+        ...options,
+        timeoutMs: options?.timeoutMs ?? COMPILE_TIMEOUT_MS,
+      })
+    ).blob(),
+
+  /** Creates a project from a ZIP archive, named after `name` or the archive. */
+  importProjectZip: (file: File, name?: string, options?: RequestOptions) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (name) form.append("name", name);
+    return request<ProjectImportResponse>("/api/projects/import", {
+      ...options,
+      method: "POST",
+      body: form,
+      timeoutMs: options?.timeoutMs ?? COMPILE_TIMEOUT_MS,
+    });
   },
 
   getProject: (id: string, options?: RequestOptions) =>
@@ -358,36 +396,8 @@ export const api = {
     request<void>(`/api/projects/${id}/files/${fileId}`, { ...options, method: "DELETE" }),
 
   /** Fetch raw bytes, e.g. to render a PDF preview. */
-  downloadFile: async (id: string, fileId: string, options?: RequestOptions): Promise<Blob> => {
-    const headers: Record<string, string> = {};
-    const resolvedToken = options?.token ?? (await tokenProvider());
-    if (resolvedToken) headers.Authorization = `Bearer ${resolvedToken}`;
-
-    const { signal, cleanup, timedOut } = buildSignal(
-      options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      options?.signal,
-    );
-
-    let response: Response;
-    try {
-      response = await fetch(
-        `${API_BASE_URL}/api/projects/${id}/files/${fileId}/download`,
-        { headers, credentials: "include", signal },
-      );
-    } catch (error) {
-      cleanup();
-      if (timedOut()) throw new ApiError(0, "Download timed out", { code: "timeout" });
-      throw new ApiError(
-        0,
-        error instanceof Error ? error.message : "Network request failed",
-        { code: "network_error" },
-      );
-    }
-
-    cleanup();
-    if (!response.ok) throw await toApiError(response);
-    return response.blob();
-  },
+  downloadFile: async (id: string, fileId: string, options?: RequestOptions): Promise<Blob> =>
+    (await fetchResponse(`/api/projects/${id}/files/${fileId}/download`, options)).blob(),
 
   // Compile
   compile: (

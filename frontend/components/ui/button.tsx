@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 
 export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "default" | "primary" | "outline" | "ghost" | "danger";
+  variant?: "default" | "primary" | "secondary" | "outline" | "ghost" | "danger";
   size?: "sm" | "md" | "lg";
 }
 
@@ -27,9 +27,13 @@ export function buttonVariants({
   className?: string;
 } = {}): string {
   return cn(
-    "inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors",
-    "focus:outline-none focus:ring-1 focus:ring-primary",
+    "inline-flex items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap select-none",
+    "transition-[color,background-color,border-color,transform] duration-150 ease-out",
+    "active:scale-[0.98] motion-reduce:active:scale-100",
+    // Keyboard focus only; an outline (not a ring) survives forced-colors mode.
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
     "disabled:opacity-50 disabled:pointer-events-none",
+    "[&_svg]:shrink-0",
 
     {
       // Primary (Indigo) - Main actions
@@ -37,6 +41,10 @@ export function buttonVariants({
 
       // Default (Dark gray) - Secondary actions
       "bg-on-surface text-surface hover:bg-on-surface/90": variant === "default",
+
+      // Secondary - Neutral bordered actions (Cancel, Import, pagination)
+      "border border-border bg-surface-container-lowest text-on-surface hover:bg-surface-container-low":
+        variant === "secondary",
 
       // Outline - Tertiary actions
       "border border-primary text-primary hover:bg-primary-fixed": variant === "outline",

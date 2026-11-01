@@ -1,17 +1,17 @@
 "use client";
 
 import React, { Suspense, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth, useSignIn } from "@clerk/nextjs";
-import { Lock, AlertCircle, ArrowRight, ArrowLeft } from "lucide-react";
+import { AlertCircle, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { mathGridStyles } from "@/lib/auth/appearance";
+import { authClasses } from "@/lib/auth/appearance";
 
 /**
- * Sign-in, rendered in the product's own design.
+ * Sign-in, rendered in the product's own design. The page frame comes from
+ * `(auth)/layout.tsx`; the card classes are shared with sign-up's Clerk card.
  *
  * Clerk's `<SignIn />` component cannot be used here: v7 exposes no localization
  * key for an input placeholder and no way to replace its internal layout, so the
@@ -131,12 +131,7 @@ function SignInForm() {
 
   // Show loading state if checking auth or already signed in
   if (!isLoaded || isSignedIn) {
-    return (
-      <div className="min-h-screen bg-math-grid flex items-center justify-center p-6 select-none">
-        <div className="text-sm text-on-surface-variant">Loading...</div>
-        <style jsx global>{mathGridStyles}</style>
-      </div>
-    );
+    return <div aria-busy="true" className={`${authClasses.card} ${authClasses.placeholder}`} />;
   }
 
   /** Activates the freshly created session and returns to the requested page. */
@@ -166,10 +161,6 @@ function SignInForm() {
 
     if (signIn.status === "needs_first_factor") {
       const strategy = signIn.supportedFirstFactors[0]?.strategy;
-      
-      // Debug: Log available strategies
-      console.log("Available first factors:", signIn.supportedFirstFactors);
-      console.log("Selected strategy:", strategy);
 
       if (strategy === "password") {
         setStep({ kind: "password" });
@@ -440,338 +431,298 @@ function SignInForm() {
   };
 
   return (
-    <div className="min-h-screen bg-math-grid flex items-center justify-center p-6 select-none">
-      {/* Card */}
-      <main className="w-full flex justify-center">
-        <div className="w-full flex flex-col items-center">
-          <div className="w-[420px] max-w-full bg-white rounded-md border border-[#E5E7EB] p-8 shadow-sm">
-            <div className="flex flex-col items-center text-center">
-              <div className="mb-6">
-                <Image
-                  src="/logo.png"
-                  alt="Likhitex"
-                  width={180}
-                  height={50}
-                  priority
-                  className="h-10 w-auto"
+    <div className="flex w-full flex-col items-center">
+      <div className={authClasses.card}>
+        <div className="text-center">
+          <h1 className={authClasses.title}>Sign in to Likhitex</h1>
+          <p className={`mt-2 ${authClasses.subtitle}`}>
+            Private workspace for your group&apos;s LaTeX projects
+          </p>
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="mt-5 flex items-start gap-1.5 rounded-lg bg-error/10 border border-error/30 px-3 py-2 text-xs text-error"
+          >
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="mt-6 space-y-4">
+          {step.kind === "identifier" && (
+            <>
+              <Button
+                variant="ghost"
+                className="h-9 w-full border border-surface-container-high bg-surface-container-lowest text-sm text-on-surface"
+                onClick={() => void continueWithGoogle()}
+                disabled={isBusy}
+              >
+                <GoogleIcon />
+                <span>Continue with Google</span>
+              </Button>
+
+              <div className="relative flex items-center justify-center my-3">
+                <div className="w-full border-t border-surface-container-high"></div>
+                <span className="absolute bg-surface-container-lowest px-2.5 font-mono text-[11px] uppercase text-on-surface-variant">
+                  or
+                </span>
+              </div>
+
+              <form onSubmit={submitIdentifier} className="space-y-3">
+                <div>
+                  <label
+                    htmlFor="signin-email"
+                    className="mb-1.5 block text-xs font-medium text-on-surface"
+                  >
+                    Academic or institutional email
+                  </label>
+                  <Input
+                    type="email"
+                    id="signin-email"
+                    name="identifier"
+                    autoComplete="email"
+                    placeholder="user@university.edu"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    disabled={isBusy}
+                    required
+                  />
+                </div>
+
+                <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
+                  <span>{isSubmitting ? "Continuing..." : "Continue"}</span>
+                  <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                </Button>
+              </form>
+            </>
+          )}
+
+          {step.kind === "password" && (
+            <form onSubmit={submitPassword} className="space-y-3">
+              <p className="text-xs text-on-surface-variant">
+                Enter the password for{" "}
+                <span className="font-[family-name:var(--font-mono)] text-on-surface">
+                  {identifier}
+                </span>
+              </p>
+              <div>
+                <label
+                  htmlFor="signin-password"
+                  className="mb-1.5 block text-xs font-medium text-on-surface"
+                >
+                  Password
+                </label>
+                <Input
+                  type="password"
+                  id="signin-password"
+                  autoComplete="current-password"
+                  placeholder="Your password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={isBusy}
+                  required
+                  autoFocus
                 />
               </div>
-              <h2 className="text-xl font-bold tracking-tight text-on-surface">
-                Sign in to Likhitex
-              </h2>
-              <p className="text-xs text-on-surface-variant mt-1 font-normal">
-                Invite-only workspace for LaTeX projects
-              </p>
-            </div>
-
-            {error && (
-              <div
-                role="alert"
-                className="mt-5 flex items-start gap-1.5 rounded-lg bg-error/10 border border-error/30 px-3 py-2 text-xs text-error"
-              >
-                <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            <div className="mt-6 space-y-4">
-              {step.kind === "identifier" && (
-                <>
-                  <Button
-                    variant="default"
-                    className="w-full"
-                    onClick={() => void continueWithGoogle()}
-                    disabled={isBusy}
-                  >
-                    <GoogleIcon />
-                    <span>Continue with Google</span>
-                  </Button>
-
-                  <div className="relative flex items-center justify-center my-3">
-                    <div className="border-t border-[#E5E7EB] w-full"></div>
-                    <span className="bg-white px-2.5 text-[11px] font-mono text-outline uppercase absolute">
-                      or
-                    </span>
-                  </div>
-
-                  <form onSubmit={submitIdentifier} className="space-y-3">
-                    <div>
-                      <label
-                        htmlFor="signin-email"
-                        className="block text-xs font-medium text-[#374151] mb-1.5"
-                      >
-                        Academic or institutional email
-                      </label>
-                      <Input
-                        type="email"
-                        id="signin-email"
-                        name="identifier"
-                        autoComplete="email"
-                        placeholder="user@university.edu"
-                        value={email}
-                        onChange={(event) => setEmail(event.target.value)}
-                        disabled={isBusy}
-                        required
-                      />
-                    </div>
-
-                    <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
-                      <span>{isSubmitting ? "Continuing..." : "Continue"}</span>
-                      <ArrowRight className="w-3.5 h-3.5 text-outline" />
-                    </Button>
-                  </form>
-                </>
-              )}
-
-              {step.kind === "password" && (
-                <form onSubmit={submitPassword} className="space-y-3">
-                  <p className="text-xs text-on-surface-variant">
-                    Enter the password for{" "}
-                    <span className="font-[family-name:var(--font-mono)] text-on-surface">
-                      {identifier}
-                    </span>
-                  </p>
-                  <div>
-                    <label
-                      htmlFor="signin-password"
-                      className="block text-xs font-medium text-[#374151] mb-1.5"
-                    >
-                      Password
-                    </label>
-                    <Input
-                      type="password"
-                      id="signin-password"
-                      autoComplete="current-password"
-                      placeholder="Your password"
-                      value={password}
-                      onChange={(event) => setPassword(event.target.value)}
-                      disabled={isBusy}
-                      required
-                      autoFocus
-                    />
-                  </div>
-                  <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
-                    {isSubmitting ? "Signing in..." : "Sign in"}
-                  </Button>
-                  <div className="flex flex-col gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void forgotPassword()}
-                      className="w-full text-[11px] text-primary hover:text-primary/80 hover:underline underline-offset-2"
-                      disabled={isBusy}
-                    >
-                      Forgot password?
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void startOver()}
-                      className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
-                    >
-                      Use a different email
-                    </button>
-                  </div>
-                </form>
-              )}
-
-              {step.kind === "forgot_password" && (
-                <div className="space-y-3">
-                  <p className="text-xs text-on-surface-variant">
-                    We sent a password reset code to{" "}
-                    <span className="font-[family-name:var(--font-mono)] text-on-surface">
-                      {identifier}
-                    </span>
-                  </p>
-                  <form onSubmit={resetPassword} className="space-y-3">
-                    <div>
-                      <label
-                        htmlFor="reset-code"
-                        className="block text-xs font-medium text-[#374151] mb-1.5"
-                      >
-                        Reset code
-                      </label>
-                      <Input
-                        type="text"
-                        id="reset-code"
-                        inputMode="numeric"
-                        autoComplete="one-time-code"
-                        placeholder="000000"
-                        value={code}
-                        onChange={(event) => setCode(event.target.value)}
-                        disabled={isBusy}
-                        required
-                        autoFocus
-                      />
-                    </div>
-                    <div>
-                      <label
-                        htmlFor="new-password"
-                        className="block text-xs font-medium text-[#374151] mb-1.5"
-                      >
-                        New password
-                      </label>
-                      <Input
-                        type="password"
-                        id="new-password"
-                        autoComplete="new-password"
-                        placeholder="Create a new password"
-                        value={newPassword}
-                        onChange={(event) => setNewPassword(event.target.value)}
-                        disabled={isBusy}
-                        required
-                      />
-                    </div>
-                    <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
-                      {isSubmitting ? "Resetting..." : "Reset password"}
-                    </Button>
-                  </form>
-                  <button
-                    type="button"
-                    onClick={() => void startOver()}
-                    className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
-                  >
-                    Back to sign in
-                  </button>
-                </div>
-              )}
-
-              {step.kind === "email_code" && (
-                <form onSubmit={submitEmailCode} className="space-y-3">
-                  <p className="text-xs text-on-surface-variant">
-                    We sent a code to{" "}
-                    <span className="font-[family-name:var(--font-mono)] text-on-surface">
-                      {identifier}
-                    </span>
-                  </p>
-                  <div>
-                    <label
-                      htmlFor="signin-code"
-                      className="block text-xs font-medium text-[#374151] mb-1.5"
-                    >
-                      Verification code
-                    </label>
-                    <Input
-                      type="text"
-                      id="signin-code"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      placeholder="000000"
-                      value={code}
-                      onChange={(event) => setCode(event.target.value)}
-                      disabled={isBusy}
-                      required
-                      autoFocus
-                    />
-                  </div>
-                  <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
-                    {isSubmitting ? "Verifying..." : "Verify"}
-                  </Button>
-                  <button
-                    type="button"
-                    onClick={() => void startOver()}
-                    className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
-                  >
-                    Use a different email
-                  </button>
-                </form>
-              )}
-
-              {step.kind === "email_link_sent" && (
-                <div className="space-y-3 text-center">
-                  <p className="text-xs text-on-surface-variant">
-                    A sign-in link was sent to{" "}
-                    <span className="font-[family-name:var(--font-mono)] text-on-surface">
-                      {identifier}
-                    </span>
-                    . Open it on this device to finish signing in.
-                  </p>
-                  <Button
-                    variant="default"
-                    className="w-full"
-                    onClick={() => void resendEmailLink()}
-                    disabled={isBusy}
-                  >
-                    {isSubmitting ? "Sending..." : "Send again"}
-                  </Button>
-                  <button
-                    type="button"
-                    onClick={() => void startOver()}
-                    className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
-                  >
-                    Use a different email
-                  </button>
-                </div>
-              )}
-
-              {step.kind === "second_factor" && (
-                <form onSubmit={submitSecondFactor} className="space-y-3">
-                  <p className="text-xs text-on-surface-variant">
-                    {signIn?.supportedSecondFactors?.[0]?.strategy === "backup_code"
-                      ? "Enter one of your backup codes"
-                      : "Enter the code from your authenticator app"}{" "}
-                    for{" "}
-                    <span className="font-[family-name:var(--font-mono)] text-on-surface">
-                      {identifier}
-                    </span>
-                  </p>
-                  <div>
-                    <label
-                      htmlFor="signin-2fa"
-                      className="block text-xs font-medium text-[#374151] mb-1.5"
-                    >
-                      Authentication code
-                    </label>
-                    <Input
-                      type="text"
-                      id="signin-2fa"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      placeholder="000000"
-                      value={code}
-                      onChange={(event) => setCode(event.target.value)}
-                      disabled={isBusy}
-                      required
-                      autoFocus
-                    />
-                  </div>
-                  <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
-                    {isSubmitting ? "Verifying..." : "Verify"}
-                  </Button>
-                </form>
-              )}
-            </div>
-
-            {/* Card Footer */}
-            <div className="mt-6 pt-4 border-t border-[#F3F4F6] text-center space-y-3">
-              <p className="text-[11px] text-on-surface-variant font-normal flex items-center justify-center gap-1.5">
-                <Lock className="w-3 h-3 text-outline flex-shrink-0" />
-                <span>Access is limited to invited members</span>
-              </p>
-              <p className="text-xs text-on-surface-variant">
-                Have an invitation?{" "}
-                <Link
-                  href="/sign-up"
-                  className="text-primary hover:text-primary/80 font-medium underline underline-offset-2"
+              <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
+                {isSubmitting ? "Signing in..." : "Sign in"}
+              </Button>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => void forgotPassword()}
+                  className="w-full text-[11px] text-primary hover:text-primary/80 hover:underline underline-offset-2"
+                  disabled={isBusy}
                 >
-                  Create account
-                </Link>
+                  Forgot password?
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void startOver()}
+                  className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
+                >
+                  Use a different email
+                </button>
+              </div>
+            </form>
+          )}
+
+          {step.kind === "forgot_password" && (
+            <div className="space-y-3">
+              <p className="text-xs text-on-surface-variant">
+                We sent a password reset code to{" "}
+                <span className="font-[family-name:var(--font-mono)] text-on-surface">
+                  {identifier}
+                </span>
               </p>
+              <form onSubmit={resetPassword} className="space-y-3">
+                <div>
+                  <label
+                    htmlFor="reset-code"
+                    className="mb-1.5 block text-xs font-medium text-on-surface"
+                  >
+                    Reset code
+                  </label>
+                  <Input
+                    type="text"
+                    id="reset-code"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    placeholder="000000"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    disabled={isBusy}
+                    required
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="new-password"
+                    className="mb-1.5 block text-xs font-medium text-on-surface"
+                  >
+                    New password
+                  </label>
+                  <Input
+                    type="password"
+                    id="new-password"
+                    autoComplete="new-password"
+                    placeholder="Create a new password"
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                    disabled={isBusy}
+                    required
+                  />
+                </div>
+                <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
+                  {isSubmitting ? "Resetting..." : "Reset password"}
+                </Button>
+              </form>
+              <button
+                type="button"
+                onClick={() => void startOver()}
+                className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
+              >
+                Back to sign in
+              </button>
             </div>
-          </div>
+          )}
 
-          {/* Navigation Links Below Card */}
-          <div className="mt-6 flex flex-col items-center gap-3">
-            <Link
-              href="/"
-              className="flex items-center gap-1.5 text-xs text-on-surface-variant hover:text-on-surface transition-colors"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Home</span>
-            </Link>
-          </div>
+          {step.kind === "email_code" && (
+            <form onSubmit={submitEmailCode} className="space-y-3">
+              <p className="text-xs text-on-surface-variant">
+                We sent a code to{" "}
+                <span className="font-[family-name:var(--font-mono)] text-on-surface">
+                  {identifier}
+                </span>
+              </p>
+              <div>
+                <label
+                  htmlFor="signin-code"
+                  className="mb-1.5 block text-xs font-medium text-on-surface"
+                >
+                  Verification code
+                </label>
+                <Input
+                  type="text"
+                  id="signin-code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="000000"
+                  value={code}
+                  onChange={(event) => setCode(event.target.value)}
+                  disabled={isBusy}
+                  required
+                  autoFocus
+                />
+              </div>
+              <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
+                {isSubmitting ? "Verifying..." : "Verify"}
+              </Button>
+              <button
+                type="button"
+                onClick={() => void startOver()}
+                className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
+              >
+                Use a different email
+              </button>
+            </form>
+          )}
+
+          {step.kind === "email_link_sent" && (
+            <div className="space-y-3 text-center">
+              <p className="text-xs text-on-surface-variant">
+                A sign-in link was sent to{" "}
+                <span className="font-[family-name:var(--font-mono)] text-on-surface">
+                  {identifier}
+                </span>
+                . Open it on this device to finish signing in.
+              </p>
+              <Button
+                variant="default"
+                className="w-full"
+                onClick={() => void resendEmailLink()}
+                disabled={isBusy}
+              >
+                {isSubmitting ? "Sending..." : "Send again"}
+              </Button>
+              <button
+                type="button"
+                onClick={() => void startOver()}
+                className="w-full text-[11px] text-on-surface-variant hover:text-on-surface hover:underline underline-offset-2"
+              >
+                Use a different email
+              </button>
+            </div>
+          )}
+
+          {step.kind === "second_factor" && (
+            <form onSubmit={submitSecondFactor} className="space-y-3">
+              <p className="text-xs text-on-surface-variant">
+                {signIn?.supportedSecondFactors?.[0]?.strategy === "backup_code"
+                  ? "Enter one of your backup codes"
+                  : "Enter the code from your authenticator app"}{" "}
+                for{" "}
+                <span className="font-[family-name:var(--font-mono)] text-on-surface">
+                  {identifier}
+                </span>
+              </p>
+              <div>
+                <label
+                  htmlFor="signin-2fa"
+                  className="mb-1.5 block text-xs font-medium text-on-surface"
+                >
+                  Authentication code
+                </label>
+                <Input
+                  type="text"
+                  id="signin-2fa"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="000000"
+                  value={code}
+                  onChange={(event) => setCode(event.target.value)}
+                  disabled={isBusy}
+                  required
+                  autoFocus
+                />
+              </div>
+              <Button type="submit" variant="primary" className="w-full" disabled={isBusy}>
+                {isSubmitting ? "Verifying..." : "Verify"}
+              </Button>
+            </form>
+          )}
         </div>
-      </main>
+      </div>
 
-      <style jsx global>{mathGridStyles}</style>
+      <p className="mt-6 text-sm text-on-surface-variant">
+        Have an invitation?{" "}
+        <Link href="/sign-up" className="font-medium text-primary underline underline-offset-2 hover:text-primary/80">
+          Create your account
+        </Link>
+      </p>
     </div>
   );
 }

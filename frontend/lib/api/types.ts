@@ -96,6 +96,15 @@ export interface ProjectListResponse {
   page_size: number;
 }
 
+/** Result of `POST /api/projects/import`: the new project plus what was skipped. */
+export interface ProjectImportResponse {
+  project: ProjectResponse;
+  /** Number of files stored from the archive. */
+  imported: number;
+  /** Archive entries the API refused (bad extension, path, or size). */
+  skipped: string[];
+}
+
 // --- Files -----------------------------------------------------------------
 
 /**

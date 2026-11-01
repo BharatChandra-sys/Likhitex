@@ -16,6 +16,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
 # TeX Live for in-process compilation, plus curl for the health check.
+# cm-super-minimal is only a "Recommended" of fonts-extra, so it must be named:
+# without it \usepackage[T1]{fontenc} has no scalable fonts, and texmf.cnf turns
+# off the bitmap fallback.
 # texlive-fonts-extra adds ~1GB but is required: newtxtext.sty and other font
 # packages live there, and user documents depend on them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         texlive-science \
         texlive-bibtex-extra \
         texlive-publishers \
+        texlive-xetex \
+        texlive-luatex \
+        cm-super-minimal \
         lmodern \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/share/doc/texlive* /usr/share/texlive/texmf-dist/doc
@@ -50,12 +56,17 @@ RUN useradd --create-home --shell /bin/bash appuser \
 
 USER appuser
 
-# Fail the build rather than ship an image whose every compile fails.
+# Fail the build rather than ship an image that cannot compile common documents.
+# Render keeps the previous deploy live when a build fails.
 RUN cd /tmp \
-    && printf '%s\n' '\documentclass{article}' '\usepackage{amsmath,graphicx,hyperref,geometry,microtype}' \
+    && printf '%s\n' '\documentclass{article}' '\usepackage[T1]{fontenc}' '\usepackage[english]{babel}' \
+        '\usepackage{amsmath,graphicx,hyperref,geometry,microtype,booktabs,natbib,tikz,xcolor,listings}' \
         '\begin{document}' 'build check $E=mc^2$' '\end{document}' > check.tex \
     && pdflatex -no-shell-escape -interaction=nonstopmode check.tex > /dev/null \
     && test -s check.pdf \
+    && rm -f check.* \
+    && printf '%s\n' '\documentclass{article}' '\usepackage{fontspec}' '\begin{document}' 'x' '\end{document}' > check.tex \
+    && (xelatex -no-shell-escape -interaction=nonstopmode check.tex > /dev/null || echo 'WARNING: xelatex check failed') \
     && rm -f check.*
 
 # Render injects PORT (10000); 8000 is the local default.

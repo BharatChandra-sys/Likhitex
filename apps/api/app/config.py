@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     COMPILE_REMOTE_ENDPOINT: str = ""
     COMPILE_REMOTE_API_KEY: str = ""
     COMPILE_DRAFT_MODE: bool = False  # Enable draft mode for faster compilation during editing
+    # Optional OCI runtime for the local Docker backend, e.g. "runsc" (gVisor)
+    # when self-hosting. Render cannot use it; leave empty there.
+    COMPILE_DOCKER_RUNTIME: str = ""
 
     # WebSocket / collaboration
     COLLAB_WS_URL: str = "ws://localhost:1234/collab"
